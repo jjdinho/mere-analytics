@@ -5,31 +5,31 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/kelseyhightower/envconfig"
+	"github.com/caarlos0/env/v11"
 )
 
 type Config struct {
-	Port int `envconfig:"PORT" default:"8080"`
+	Port int `env:"PORT" envDefault:"8080"`
 
-	PostgresHost     string `envconfig:"POSTGRES_HOST" required:"true"`
-	PostgresPort     int    `envconfig:"POSTGRES_PORT" default:"5432"`
-	PostgresDB       string `envconfig:"POSTGRES_DB" default:"mere"`
-	PostgresUser     string `envconfig:"POSTGRES_USER" default:"mere"`
-	PostgresPassword string `envconfig:"POSTGRES_PASSWORD" required:"true"`
+	PostgresHost     string `env:"POSTGRES_HOST,required"`
+	PostgresPort     int    `env:"POSTGRES_PORT" envDefault:"5432"`
+	PostgresDB       string `env:"POSTGRES_DB" envDefault:"mere"`
+	PostgresUser     string `env:"POSTGRES_USER" envDefault:"mere"`
+	PostgresPassword string `env:"POSTGRES_PASSWORD,required"`
 
-	ClickHouseHost             string `envconfig:"CLICKHOUSE_HOST" required:"true"`
-	ClickHousePort             int    `envconfig:"CLICKHOUSE_PORT" default:"9000"`
-	ClickHouseDatabase         string `envconfig:"CLICKHOUSE_DATABASE" default:"analytics"`
-	ClickHouseAdminUser        string `envconfig:"CLICKHOUSE_ADMIN_USER" default:"mere_admin"`
-	ClickHouseAdminPassword    string `envconfig:"CLICKHOUSE_ADMIN_PASSWORD" required:"true"`
-	ClickHouseReadonlyUser     string `envconfig:"CLICKHOUSE_READONLY_USER" default:"mere_readonly"`
-	ClickHouseReadonlyPassword string `envconfig:"CLICKHOUSE_READONLY_PASSWORD" required:"true"`
+	ClickHouseHost             string `env:"CLICKHOUSE_HOST,required"`
+	ClickHousePort             int    `env:"CLICKHOUSE_PORT" envDefault:"9000"`
+	ClickHouseDatabase         string `env:"CLICKHOUSE_DATABASE" envDefault:"analytics"`
+	ClickHouseAdminUser        string `env:"CLICKHOUSE_ADMIN_USER" envDefault:"mere_admin"`
+	ClickHouseAdminPassword    string `env:"CLICKHOUSE_ADMIN_PASSWORD,required"`
+	ClickHouseReadonlyUser     string `env:"CLICKHOUSE_READONLY_USER" envDefault:"mere_readonly"`
+	ClickHouseReadonlyPassword string `env:"CLICKHOUSE_READONLY_PASSWORD,required"`
 }
 
 func Load() (Config, error) {
 	var c Config
-	if err := envconfig.Process("", &c); err != nil {
-		return c, fmt.Errorf("envconfig: %w", err)
+	if err := env.Parse(&c); err != nil {
+		return c, fmt.Errorf("env: %w", err)
 	}
 	if err := c.validate(); err != nil {
 		return c, err

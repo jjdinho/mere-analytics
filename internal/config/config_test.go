@@ -138,12 +138,15 @@ func TestLogValue_coversAllConfigFields(t *testing.T) {
 		if !field.IsExported() {
 			continue
 		}
-		envName := field.Tag.Get("envconfig")
-		if envName == "" {
-			t.Errorf("field %s has no envconfig tag; LogValue check skipped", field.Name)
+		// caarlos0/env tag form is `env:"NAME"` or `env:"NAME,required"`; the
+		// env-var name is the first comma-separated segment.
+		rawTag := field.Tag.Get("env")
+		if rawTag == "" {
+			t.Errorf("field %s has no env tag; LogValue check skipped", field.Name)
 			continue
 		}
-		// LogValue uses lowercased envconfig names as keys.
+		envName, _, _ := strings.Cut(rawTag, ",")
+		// LogValue uses lowercased env-var names as keys.
 		key := strings.ToLower(envName)
 		if !strings.Contains(out, `"`+key+`"`) {
 			t.Errorf("LogValue missing key for field %s (env %s, expected key %q) — add it to LogValue()", field.Name, envName, key)
