@@ -1,0 +1,15 @@
+.git
+.gitignore
+.dockerignore
+/docker/
+/scripts/
+/docs/
+/e2e/
+README.md
+TODOS.md
+.kamal/
+.env*
+/data/
+*.test
+*.out
+coverage.txt
