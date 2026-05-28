@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: mere
+      POSTGRES_USER: mere
+      POSTGRES_PASSWORD: devpass
+    ports:
+      # Dev port is shifted to avoid clashing with a local Postgres install
+      # (Homebrew etc.). Inside the compose network the canonical 5432 is used.
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mere -d mere"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: mere_admin
+      CLICKHOUSE_PASSWORD: devpass
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      # Dev ports are shifted to avoid clashing with a local ClickHouse install.
+      - "127.0.0.1:58123:8123"
+      - "127.0.0.1:59000:9000"
+    volumes:
+      - chdata:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
+  chdata:

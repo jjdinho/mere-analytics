@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Boot the local PG + CH compose stack and start the server with sensible env.
+# Usage: ./scripts/dev
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+
+echo "==> bringing up postgres + clickhouse via docker compose"
+docker compose -f docker/docker-compose.yml up -d
+
+echo "==> waiting for services to be healthy"
+deadline=$((SECONDS + 60))
+while :; do
+  pg_ok=$(docker compose -f docker/docker-compose.yml ps --format json postgres   | grep -o '"Health":"healthy"' || true)
+  ch_ok=$(docker compose -f docker/docker-compose.yml ps --format json clickhouse | grep -o '"Health":"healthy"' || true)
+  if [[ -n "$pg_ok" && -n "$ch_ok" ]]; then
+    break
+  fi
+  if (( SECONDS >= deadline )); then
+    echo "!! services did not become healthy within 60s" >&2
+    docker compose -f docker/docker-compose.yml ps
+    exit 1
+  fi
+  sleep 1
+done
+
+export PORT=8080
+
+export POSTGRES_HOST=127.0.0.1
+export POSTGRES_PORT=55432
+export POSTGRES_DB=mere
+export POSTGRES_USER=mere
+export POSTGRES_PASSWORD=devpass
+
+export CLICKHOUSE_HOST=127.0.0.1
+export CLICKHOUSE_PORT=59000
+export CLICKHOUSE_DATABASE=analytics
+export CLICKHOUSE_ADMIN_USER=mere_admin
+export CLICKHOUSE_ADMIN_PASSWORD=devpass
+export CLICKHOUSE_READONLY_USER=mere_readonly
+export CLICKHOUSE_READONLY_PASSWORD=devpass-ro
+
+echo "==> starting server (Ctrl-C to stop)"
+exec go run ./cmd/server
