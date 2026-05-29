@@ -22,3 +22,6 @@ coverage.txt
 
 # Docker volumes (in case anyone runs compose with default volume paths)
 /data/
+
+# Local Claude Code instructions (not committed)
+/CLAUDE.md
