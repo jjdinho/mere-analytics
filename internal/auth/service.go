@@ -95,15 +95,28 @@ type SignupRequest struct {
 	Password string
 }
 
-// SignupResult is what Signup returns on success.
+// SignupResult is what Signup / SignupWithInvite return on success.
+//
+// Team is always the user's auto-created personal team. InvitedTeam is the
+// team named by the invite token and is only populated when the call went
+// through SignupWithInvite — Signup leaves it as the zero db.Team. Web
+// callers redirect to InvitedTeam after invite-based signup so the user
+// lands where they expected.
 type SignupResult struct {
-	User db.User
-	Team db.Team
+	User        db.User
+	Team        db.Team
+	InvitedTeam db.Team
 }
 
 // Signup creates a user, an auto-named "personal" team, and the membership
 // linking the two in a single transaction. Either everything lands or the
 // row state is unchanged.
+//
+// NOT wired to any HTTP route. The public /signup endpoint was removed —
+// production user creation goes through SignupWithInvite (invite-based
+// web flow) or scripts/operator/create-user.sql (operator bootstrap). This
+// function is retained as a seed primitive for tests; do not reintroduce
+// an HTTP handler that calls it.
 func (s *Service) Signup(ctx context.Context, req SignupRequest) (*SignupResult, error) {
 	email := NormalizeEmail(req.Email)
 	if err := ValidateEmail(email); err != nil {
@@ -378,16 +391,21 @@ func (s *Service) ConsumeInvite(ctx context.Context, userID, plaintextToken stri
 // Signup with invite (Issue 12 — strict)
 // ──────────────────────────────────────────────────────────────────────
 
-// SignupWithInvite runs the standard signup tx and, if an invite token is
-// supplied, consumes it in the same tx. If the invite is invalid at POST
-// time, the entire signup is aborted with ErrInviteInvalid — Issue 12's
-// strict path. Callers re-render the form with the invite cleared so the
-// user can submit without it.
+// SignupWithInvite runs the standard signup tx and consumes the invite
+// token in the same tx. If the invite is invalid at POST time, the entire
+// signup is aborted with ErrInviteInvalid — Issue 12's strict path; the
+// caller (the anon branch of /invites/{token} POST) re-renders the page
+// as InviteInvalid.
 //
-// When invitePlaintext == "" this is equivalent to Signup().
+// invitePlaintext is required — public open-signup is no longer supported.
+// Operator-bootstrapped users go through scripts/operator/create-user.sql,
+// which bypasses this path entirely.
+//
+// On success, SignupResult.Team is the user's personal team and
+// SignupResult.InvitedTeam is the team the invite belongs to.
 func (s *Service) SignupWithInvite(ctx context.Context, req SignupRequest, invitePlaintext string) (*SignupResult, error) {
 	if invitePlaintext == "" {
-		return s.Signup(ctx, req)
+		return nil, ErrInviteInvalid
 	}
 
 	email := NormalizeEmail(req.Email)
@@ -459,10 +477,15 @@ func (s *Service) SignupWithInvite(ctx context.Context, req SignupRequest, invit
 		return nil, fmt.Errorf("signup invite membership: %w", err)
 	}
 
+	invitedTeam, err := q.GetTeamByID(ctx, invite.TeamID)
+	if err != nil {
+		return nil, fmt.Errorf("signup invite team fetch: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return &SignupResult{User: user, Team: personal}, nil
+	return &SignupResult{User: user, Team: personal, InvitedTeam: invitedTeam}, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────

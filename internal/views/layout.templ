@@ -11,8 +11,8 @@ import (
 // global hx-headers so every htmx-triggered request forwards X-CSRF-Token,
 // and the minimal CSS that ships with v1.
 //
-// Pass session=nil for anonymous pages (login, signup); the layout adapts the
-// header nav.
+// Pass session=nil for anonymous pages (login, invite confirmation); the
+// layout adapts the header nav.
 templ Layout(title string, session *auth.Session) {
 	<!DOCTYPE html>
 	<html lang="en">
@@ -36,7 +36,6 @@ templ Layout(title string, session *auth.Session) {
 				} else {
 					<nav>
 						<a href="/login">Log in</a>
-						<a href="/signup">Sign up</a>
 					</nav>
 				}
 			</header>

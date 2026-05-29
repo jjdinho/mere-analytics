@@ -44,7 +44,7 @@ func Index() templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<h1>mere — running</h1><p>Self-hostable analytics. <a href=\"/signup\">Sign up</a> or <a href=\"/login\">log in</a>.</p>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<h1>mere — running</h1><p>Self-hostable analytics. <a href=\"/login\">Log in</a>.</p>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

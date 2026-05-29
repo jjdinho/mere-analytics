@@ -19,7 +19,12 @@ import (
 	"github.com/jjdinho/mere-analytics/migrations"
 )
 
-func startStack(t *testing.T) *httptest.Server {
+// startStack spins up Postgres, runs migrations, and returns the HTTP test
+// server alongside the *auth.Service so tests can seed users directly via
+// svc.Signup (the public /signup route was removed; user creation in
+// production goes through scripts/operator/create-user.sql or the anon-
+// invite POST).
+func startStack(t *testing.T) (*httptest.Server, *auth.Service) {
 	t.Helper()
 	pool, cfg := testhelpers.StartPostgres(t)
 
@@ -39,7 +44,7 @@ func startStack(t *testing.T) *httptest.Server {
 		SecureCookies: false,
 	}))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, svc
 }
 
 // clientWithJar returns an http.Client with cookie storage and redirects
@@ -85,36 +90,46 @@ func mustGet(t *testing.T, c *http.Client, url string) (*http.Response, string) 
 	return resp, string(body)
 }
 
-func TestSignup_thenAuthenticatedHome(t *testing.T) {
-	srv := startStack(t)
+// loginAs performs the full /login flow (CSRF harvest + form POST) and
+// returns the cookied client. Fails the test on any non-303 response —
+// callers are seeding for a happy-path scenario.
+func loginAs(t *testing.T, srv *httptest.Server, email, password string) *http.Client {
+	t.Helper()
 	c := clientWithJar(t)
-
-	// GET /signup → 200, returns a CSRF token in the form.
-	resp, body := mustGet(t, c, srv.URL+"/signup")
-	if resp.StatusCode != 200 {
-		t.Fatalf("GET /signup: %d", resp.StatusCode)
-	}
-	token := extractCSRFToken(t, body)
-
-	form := url.Values{}
-	form.Set("email", "alice@example.com")
-	form.Set("password", "correct horse battery staple")
-	form.Set("csrf_token", token)
-
-	postResp, err := c.PostForm(srv.URL+"/signup", form)
+	_, body := mustGet(t, c, srv.URL+"/login")
+	tok := extractCSRFToken(t, body)
+	form := url.Values{"email": {email}, "password": {password}, "csrf_token": {tok}}
+	resp, err := c.PostForm(srv.URL+"/login", form)
 	if err != nil {
-		t.Fatalf("POST /signup: %v", err)
+		t.Fatalf("login %s: %v", email, err)
 	}
-	io.Copy(io.Discard, postResp.Body)
-	postResp.Body.Close()
-	if postResp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("POST /signup: status %d, want 303", postResp.StatusCode)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("login %s: status %d, want 303", email, resp.StatusCode)
 	}
+	return c
+}
 
-	// Follow to /, expect logged-in home with email rendered.
+// seedAndLogin creates the user via svc.Signup and returns a cookied client
+// that's already logged in. Used by tests that need an authenticated viewer
+// but don't care about exercising the create-account path.
+func seedAndLogin(t *testing.T, srv *httptest.Server, svc *auth.Service, email string) *http.Client {
+	t.Helper()
+	const pw = "correct horse battery staple"
+	if _, err := svc.Signup(context.Background(), auth.SignupRequest{Email: email, Password: pw}); err != nil {
+		t.Fatalf("seed user %s: %v", email, err)
+	}
+	return loginAs(t, srv, email, pw)
+}
+
+func TestSeededUser_canLoginAndSeeHome(t *testing.T) {
+	srv, svc := startStack(t)
+	c := seedAndLogin(t, srv, svc, "alice@example.com")
+
 	homeResp, homeBody := mustGet(t, c, srv.URL+"/")
 	if homeResp.StatusCode != 200 {
-		t.Fatalf("GET / after signup: %d", homeResp.StatusCode)
+		t.Fatalf("GET / after login: %d", homeResp.StatusCode)
 	}
 	if !strings.Contains(homeBody, "alice@example.com") {
 		t.Errorf("home does not show email: %s", homeBody)
@@ -125,27 +140,20 @@ func TestSignup_thenAuthenticatedHome(t *testing.T) {
 }
 
 func TestLogin_setsCookie_LogoutDestroys(t *testing.T) {
-	srv := startStack(t)
+	srv, svc := startStack(t)
+
+	// Seed a user directly (no public /signup), then exercise the real
+	// /login + /logout flows.
+	if _, err := svc.Signup(context.Background(), auth.SignupRequest{
+		Email: "bob@example.com", Password: "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("seed bob: %v", err)
+	}
+
 	c := clientWithJar(t)
-
-	// Sign up first to have a user.
-	_, body := mustGet(t, c, srv.URL+"/signup")
-	tok := extractCSRFToken(t, body)
-	signup := url.Values{"email": {"bob@example.com"}, "password": {"correct horse battery staple"}, "csrf_token": {tok}}
-	signupResp, _ := c.PostForm(srv.URL+"/signup", signup)
-	signupResp.Body.Close()
-
-	// Logout to clear the post-signup session.
-	logoutToken := mustCSRFFromHome(t, c, srv.URL)
-	logoutResp, _ := c.PostForm(srv.URL+"/logout", url.Values{"csrf_token": {logoutToken}})
-	logoutResp.Body.Close()
-	assertNoSessionCookie(t, c, srv.URL)
-
-	// GET /login → form with CSRF.
 	_, loginBody := mustGet(t, c, srv.URL+"/login")
-	tok = extractCSRFToken(t, loginBody)
+	tok := extractCSRFToken(t, loginBody)
 
-	// POST valid creds → 303 + session cookie.
 	loginForm := url.Values{"email": {"bob@example.com"}, "password": {"correct horse battery staple"}, "csrf_token": {tok}}
 	loginResp, err := c.PostForm(srv.URL+"/login", loginForm)
 	if err != nil {
@@ -162,13 +170,13 @@ func TestLogin_setsCookie_LogoutDestroys(t *testing.T) {
 
 	// Logout → cookie cleared.
 	tok = mustCSRFFromHome(t, c, srv.URL)
-	logoutResp2, _ := c.PostForm(srv.URL+"/logout", url.Values{"csrf_token": {tok}})
-	logoutResp2.Body.Close()
+	logoutResp, _ := c.PostForm(srv.URL+"/logout", url.Values{"csrf_token": {tok}})
+	logoutResp.Body.Close()
 	assertNoSessionCookie(t, c, srv.URL)
 }
 
 func TestLogin_invalidCreds_returnsUnauthorized_NoCookie(t *testing.T) {
-	srv := startStack(t)
+	srv, _ := startStack(t)
 	c := clientWithJar(t)
 
 	_, body := mustGet(t, c, srv.URL+"/login")
@@ -192,17 +200,19 @@ func TestLogin_invalidCreds_returnsUnauthorized_NoCookie(t *testing.T) {
 	}
 }
 
+// TestCSRF_missingToken_returns403 verifies the anon /login POST is
+// CSRF-protected (the same middleware also guards the anon-invite POST).
 func TestCSRF_missingToken_returns403(t *testing.T) {
-	srv := startStack(t)
+	srv, _ := startStack(t)
 	c := clientWithJar(t)
 
 	// Prime the anon csrf cookie via GET.
-	_, _ = mustGet(t, c, srv.URL+"/signup")
+	_, _ = mustGet(t, c, srv.URL+"/login")
 
 	form := url.Values{"email": {"x@example.com"}, "password": {"correct horse battery staple"}}
-	resp, err := c.PostForm(srv.URL+"/signup", form)
+	resp, err := c.PostForm(srv.URL+"/login", form)
 	if err != nil {
-		t.Fatalf("POST /signup: %v", err)
+		t.Fatalf("POST /login: %v", err)
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
@@ -212,15 +222,15 @@ func TestCSRF_missingToken_returns403(t *testing.T) {
 }
 
 func TestCSRF_wrongToken_returns403(t *testing.T) {
-	srv := startStack(t)
+	srv, _ := startStack(t)
 	c := clientWithJar(t)
 
-	_, _ = mustGet(t, c, srv.URL+"/signup")
+	_, _ = mustGet(t, c, srv.URL+"/login")
 
 	form := url.Values{"email": {"x@example.com"}, "password": {"correct horse battery staple"}, "csrf_token": {"forgery"}}
-	resp, err := c.PostForm(srv.URL+"/signup", form)
+	resp, err := c.PostForm(srv.URL+"/login", form)
 	if err != nil {
-		t.Fatalf("POST /signup: %v", err)
+		t.Fatalf("POST /login: %v", err)
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
@@ -229,51 +239,25 @@ func TestCSRF_wrongToken_returns403(t *testing.T) {
 	}
 }
 
-func TestSignup_duplicateEmail_409(t *testing.T) {
-	srv := startStack(t)
-	c1 := clientWithJar(t)
-	c2 := clientWithJar(t)
-
-	_, body := mustGet(t, c1, srv.URL+"/signup")
-	tok := extractCSRFToken(t, body)
-	form := url.Values{"email": {"dup@example.com"}, "password": {"correct horse battery staple"}, "csrf_token": {tok}}
-	resp, _ := c1.PostForm(srv.URL+"/signup", form)
-	resp.Body.Close()
-
-	// Second client tries same email.
-	_, body2 := mustGet(t, c2, srv.URL+"/signup")
-	tok2 := extractCSRFToken(t, body2)
-	form2 := url.Values{"email": {"DUP@example.com"}, "password": {"correct horse battery staple"}, "csrf_token": {tok2}}
-	resp2, _ := c2.PostForm(srv.URL+"/signup", form2)
-	b2, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusConflict {
-		t.Errorf("second signup status: %d want 409", resp2.StatusCode)
-	}
-	if !strings.Contains(string(b2), "Email already registered") {
-		t.Errorf("body missing duplicate-email message: %s", b2)
-	}
-}
-
+// TestHomeEscapesEmail asserts templ escapes attacker-controlled email
+// content. Previously seeded via /signup; now seeded directly via
+// svc.Signup since the public route is gone. The XSS payload still passes
+// our lax email validation (single quote / angle brackets are allowed in
+// the local part).
 func TestHomeEscapesEmail(t *testing.T) {
-	srv := startStack(t)
-	c := clientWithJar(t)
-
-	_, body := mustGet(t, c, srv.URL+"/signup")
-	tok := extractCSRFToken(t, body)
-	// "<script>" in an email actually fails our @-check, so use a payload that
-	// passes ValidateEmail but would XSS if templ didn't escape: a single quote
-	// or angle bracket in the local part is allowed by our lax validator.
-	xssEmail := `<img src=x>@evil.example`
-	form := url.Values{"email": {xssEmail}, "password": {"correct horse battery staple"}, "csrf_token": {tok}}
-	resp, _ := c.PostForm(srv.URL+"/signup", form)
-	resp.Body.Close()
+	srv, svc := startStack(t)
+	const xssEmail = `<img src=x>@evil.example`
+	if _, err := svc.Signup(context.Background(), auth.SignupRequest{
+		Email: xssEmail, Password: "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("seed xss user: %v", err)
+	}
+	c := loginAs(t, srv, xssEmail, "correct horse battery staple")
 
 	_, home := mustGet(t, c, srv.URL+"/")
 	if strings.Contains(home, "<img src=x>") {
 		t.Errorf("templ did not escape email: %s", home)
 	}
-	// Must contain the escaped form.
 	if !strings.Contains(home, "&lt;img src=x&gt;") {
 		t.Errorf("escaped form missing: %s", home)
 	}
@@ -282,7 +266,7 @@ func TestHomeEscapesEmail(t *testing.T) {
 func mustCSRFFromHome(t *testing.T, c *http.Client, base string) string {
 	t.Helper()
 	// Use the logout form on the layout to harvest a token. If user is not
-	// authenticated, /signup will do.
+	// authenticated, /login will do.
 	resp, err := c.Get(base + "/")
 	if err != nil {
 		t.Fatalf("GET /: %v", err)

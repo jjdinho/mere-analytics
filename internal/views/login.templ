@@ -1,8 +1,12 @@
 package views
 
 // Login is the password form. invitePlaintext rides along when the user
-// arrived via /login?invite=:t (Issue 8) — the hidden field threads it
-// through to POST /login, which consumes the invite after a successful auth.
+// arrived via /login?invite=:t — the hidden field threads it through to
+// POST /login, which consumes the invite after a successful auth.
+//
+// There is no public signup. New users without an invite can't create an
+// account from this page; new users with an invite get a "back to invite"
+// link instead, which lands them on the invite page's inline signup form.
 templ Login(emailValue, errMsg, invitePlaintext, inviteTeamName string) {
 	@Layout("Log in", nil) {
 		if inviteTeamName != "" {
@@ -27,9 +31,7 @@ templ Login(emailValue, errMsg, invitePlaintext, inviteTeamName string) {
 			<button type="submit">Log in</button>
 		</form>
 		if invitePlaintext != "" {
-			<p>New here? <a href={ templ.URL("/signup?invite=" + invitePlaintext) }>Sign up to join</a>.</p>
-		} else {
-			<p>New here? <a href="/signup">Create an account</a>.</p>
+			<p>New here? <a href={ templ.URL("/invites/" + invitePlaintext) }>Create an account to join</a>.</p>
 		}
 	}
 }

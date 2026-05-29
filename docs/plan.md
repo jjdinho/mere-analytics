@@ -133,7 +133,7 @@ One binary, two databases. No worker process in v1 — async work runs as gorout
     /clickhouse/users.xml   # defines mere_admin + mere_readonly users
     /clickhouse/config.xml  # async-insert defaults, log TTLs
 /scripts/
-  /operator/                # SQL scripts invoked by Kamal aliases (reset-password.sql, wipe-project.sql, ...)
+  /operator/                # SQL scripts invoked by Kamal aliases (create-user.sql, reset-password.sql, wipe-project.sql, ...)
   dev                       # start docker compose + run server with hot reload
 /docker/
   docker-compose.yml        # local dev only — Kamal handles production
@@ -238,8 +238,8 @@ Strict on required fields, lenient on extras:
 
 Server-rendered (templ) + htmx for interactivity. Pages:
 
-- `/signup`, `/login`, `/logout` — open signup; the deployer fronts the URL with whatever ACL they want (e.g. cloudflare access, basic auth, VPN).
-- `/teams/:id` — team settings, member list, "Generate invite link" button. Clicking produces a one-shot URL (`/invites/:token`) that the inviter copies and shares out-of-band. Visiting the URL while logged-out routes to signup; while logged-in, adds the current user to the team. Each token is consumable once and has a 7-day TTL.
+- `/login`, `/logout` — there is no public signup route. The first user is created by the operator via `kamal create-user` (see "Operator actions"); subsequent users join via invite links. This means the deployer doesn't need to front the URL with an ACL to keep strangers out.
+- `/teams/:id` — team settings, member list, "Generate invite link" button. Clicking produces a one-shot URL (`/invites/:token`) that the inviter copies and shares out-of-band. Visiting the URL while logged-out renders an inline signup form (POST creates the account, consumes the invite, and logs the user in atomically); while logged-in, it adds the current user to the team. Each token is consumable once and has a 7-day TTL.
 - `/teams/:id/projects` — projects in this team; create / soft-delete.
 - `/projects/:id` — settings, API tokens (create / revoke).
 - `/projects/:id/events` — recent events table, filterable, paginated.
@@ -319,6 +319,12 @@ Example `deploy.yml` entries:
 
 ```yaml
 aliases:
+  create-user: >
+    accessory exec postgres -i
+    "psql -U $POSTGRES_USER -d $POSTGRES_DB
+     -v email=$EMAIL -v password=$INITIAL_PASSWORD
+     -f /operator/create-user.sql"
+
   reset-password: >
     accessory exec postgres -i
     "psql -U $POSTGRES_USER -d $POSTGRES_DB
@@ -334,7 +340,8 @@ aliases:
 Operator invocation from their laptop (after `kamal config` is set up):
 
 ```bash
-EMAIL=user@example.com NEW_PASSWORD=temp-pw-1234 kamal reset-password
+EMAIL=admin@example.com INITIAL_PASSWORD=temp-pw-1234 kamal create-user
+EMAIL=user@example.com  NEW_PASSWORD=temp-pw-1234     kamal reset-password
 PROJECT_ID=01HX... kamal wipe-project
 ```
 
@@ -342,6 +349,7 @@ Initial v1 alias set:
 
 | Alias | Purpose | Backend |
 |---|---|---|
+| `create-user` | Bootstrap a user (with auto-named personal team and membership) on a fresh deploy. The first user is created this way; subsequent users come in via invite links. `must_change_password=true` is set so they're forced to rotate on first login. | `postgres` + `pgcrypto` |
 | `reset-password` | Force-reset a user's password | `postgres` + `pgcrypto` |
 | `wipe-project` | Permanently delete a project's CH data after soft-delete | `clickhouse` |
 | `db-console` | Open `psql` against the running deployment | `postgres` |
@@ -384,6 +392,10 @@ EOF
 
 # 5. One command does everything.
 kamal setup
+
+# 6. Bootstrap the first user. They'll be forced to change the password
+#    on first login.
+EMAIL=admin@example.com INITIAL_PASSWORD=temp-pw-1234 kamal create-user
 ```
 
 `kamal setup` runs end-to-end on the VPS:
@@ -396,7 +408,7 @@ kamal setup
 6. App entry point runs pending PG migrations (as the app's PG user) and CH migrations (as `mere_admin`), then starts the HTTP server.
 7. `kamal-proxy` fronts the app, terminates TLS via Let's Encrypt for the configured hostname.
 
-After that, subsequent releases are just `kamal deploy`: pulls the new image, restarts the container (which re-runs pending migrations on boot), zero-downtime rollout.
+After `kamal setup`, the operator runs `kamal create-user` once to create the first account; further users come in through invite links generated inside the web UI. Subsequent releases are just `kamal deploy`: pulls the new image, restarts the container (which re-runs pending migrations on boot), zero-downtime rollout.
 
 ### `config/deploy.yml` shape
 
@@ -477,6 +489,7 @@ accessories:
       ulimit: "nofile=262144:262144"
 
 aliases:
+  create-user:       accessory exec postgres -i "psql -U $POSTGRES_USER -d $POSTGRES_DB -v email=$EMAIL -v password=$INITIAL_PASSWORD -f /operator/create-user.sql"
   reset-password:    accessory exec postgres -i "psql -U $POSTGRES_USER -d $POSTGRES_DB -v email=$EMAIL -v password=$NEW_PASSWORD -f /operator/reset-password.sql"
   wipe-project:      accessory exec clickhouse -i "clickhouse-client --query \"ALTER TABLE analytics.events_v2 DELETE WHERE project_id = '$PROJECT_ID'\""
   db-console:        accessory exec postgres -i "psql -U $POSTGRES_USER -d $POSTGRES_DB"
@@ -604,7 +617,7 @@ Shipped on branch `jjdinho/review-plan-next-step`. A user can sign up, log in, a
 **Decisions for this step:**
 - Session cookie: `mere_session`, HttpOnly, SameSite=Lax, PG-backed. Sliding expiry on each authenticated request; hard cap 30 days.
 - CSRF: per-session token in `sessions.csrf_token`; templ `@csrfField()` helper for forms; htmx layout sets `hx-headers='{"X-CSRF-Token":"..."}'` globally; middleware verifies on non-GET requests to web routes; `/v1/*` and `/mcp` exempt (Bearer auth, no cookie).
-- Open signup; bot-flood mitigation is the deployer's responsibility (front with Cloudflare Access / basic auth / VPN). Plan Non-goals + decisions log #4.
+- No public signup. The first user is created by the operator via `kamal create-user` (SQL script against the postgres accessory, same trust boundary as `kamal reset-password`); subsequent users join via invite links. Decisions log #4.
 - Bcrypt cost = 10 (Go default).
 - `reset-password.sql` raises on unknown email so kamal alias exits non-zero (don't silently report success on a typo'd email).
 - Adopt `sqlc` here, before any hand-written PG queries: set up `sqlc.yaml`, generate into `internal/postgres/db/`, use generated queries from step 3 onward.
@@ -709,6 +722,17 @@ Shipped on branch `jjdinho/check-build-progress`. A logged-in user can view thei
 - Security: cross-user authorization on every `/teams/:id` and `/projects/:id` route — user A cannot view user B's data.
 
 **Done when:** Create a team via UI, invite a second user, create a project, issue a token (visible once), revoke it, soft-delete the project.
+
+#### Post-step-4 follow-up: operator-bootstrapped first user [DONE]
+
+Shipped after step 4. Removes the public `/signup` route; the first user is created by the operator via a new `kamal create-user` alias, and logged-out invitees now create their account inline on `/invites/:token` instead of being routed to `/signup?invite=:t`. Motivation: the prior model ("open signup; deployer fronts the URL with an ACL") was awkward because the same hostname also serves `/v1/ingest`, which must stay reachable; path-based proxy rules are non-trivial and undercut the "easily deployed" promise. The new flow needs no proxy ACL — strangers can't create accounts because there's no public path to do so. See [decisions log #4](#decisions-log).
+
+- New: `scripts/operator/create-user.sql` (mirrors `reset-password.sql` conventions: pgcrypto bcrypt cost 10, GUC stashing for `:vars` inside `DO` blocks, `must_change_password=TRUE`, descriptive duplicate-email error). IDs are `gen_random_uuid()` (v4) — deliberate exception to the app's UUID v7 convention; no codepath orders by `id`.
+- Removed: `/signup` route, `getSignup`/`postSignup` handlers, `signup.templ`. `auth.Service.Signup` is retained as a test/seed primitive only (doc-commented as non-HTTP).
+- Tightened: `auth.Service.SignupWithInvite` requires a non-empty invite token; `SignupResult` gains `InvitedTeam` so the anon-invite handler can redirect to the invited team page after auto-login.
+- `/invites/:token` GET renders an inline `email + password` form for anon viewers (plus an "Already have an account? Log in" link to `/login?invite=:t` for existing users). POST creates the account, consumes the invite, and sets a session cookie in one transaction.
+- Tests: `internal/auth/create_user_test.go` (happy path, duplicate email, short password, empty email); `internal/web/*` rewritten to seed via `svc.Signup` directly + new tests for the anon-invite POST (happy, duplicate email, invalid token, CSRF).
+- Plan alias entry + "What the operator does (from zero)" updated; decisions log #4 + #15 updated.
 
 ### Step 5 — Ingest
 
@@ -954,7 +978,7 @@ Shipped on branch `jjdinho/check-build-progress`. A logged-in user can view thei
 | 1 | Admin role in the app? | **No admin role.** All accounts are regular users scoped to teams + projects. The operator is the person with shell access. |
 | 2 | Password reset? | **Skip in-app in v1.** Operator runs `kamal reset-password` (Kamal alias → `pgcrypto` SQL against postgres accessory). |
 | 3 | Per-project ClickHouse users? | **No.** Two CH users total: `mere_admin` + `mere_readonly`. Isolation enforced at the app layer. |
-| 4 | First-user signup model? | **Open signup.** Deployer fronts the URL with their own ACL if they want to gate it. |
+| 4 | First-user signup model? | **Operator-bootstrapped, invite-only thereafter.** First user via `kamal create-user` (a SQL alias against the postgres accessory, mirroring `kamal reset-password`). Further users join via team invite links — logged-out invitees create their account inline on `/invites/:token`. The deployer doesn't need to gate the URL to keep strangers out. |
 | 5 | Ingest validation strictness? | **Strict on required fields** (`event`, `timestamp`), **lenient on extras** (any extra props accepted). |
 | 6 | MCP implementation? | **`github.com/mark3labs/mcp-go`** (community library). |
 | 7 | Project deletion? | **Soft delete in Postgres** (`deleted_at`). ClickHouse data persists. Operator wipes manually if they want. |
@@ -965,7 +989,7 @@ Shipped on branch `jjdinho/check-build-progress`. A logged-in user can view thei
 | 12 | `failed_events` retention after drain? | **Delete on successful drain.** Pure retry buffer, not an audit trail. |
 | 13 | Multi-tenant query isolation? | **ClickHouse `additional_table_filters` setting** attached per request. User SQL is unmodified; CH applies the filter at execution. No SQL parser to maintain. |
 | 14 | Team invite flow? | **Invite-by-link.** One-shot token, 7-day TTL, generated from team settings. Inviter shares the URL out-of-band; recipient signs up (or logs in) and joins. |
-| 15 | Operator alias surface in v1? | **The four listed:** `reset-password`, `wipe-project`, `db-console`, `clickhouse-console` — plus Kamal-default `console` and `logs`. No user-management aliases until asked for. |
+| 15 | Operator alias surface in v1? | **The five listed:** `create-user`, `reset-password`, `wipe-project`, `db-console`, `clickhouse-console` — plus Kamal-default `console` and `logs`. `create-user` exists because there's no public signup; further user management still happens in the web UI via invite links. |
 | 16 | `audit_log` in v1? | **Skip.** Add when an operator asks for it. Not in the Postgres schema. |
 | 17 | Image arch in CI? | **amd64 only in v1.** arm64 added when someone asks; saves CI matrix + build time now. |
 | 18 | Backup strategy? | **Hetzner automated backups** by default (block-level disk snapshots, enabled in Hetzner Console). Self-hosters on other providers run `pg_dump` + `clickhouse-backup` themselves — example scripts in `docs/self-host.md`. No built-in accessory in v1. |

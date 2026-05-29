@@ -11,8 +11,9 @@ import (
 )
 
 // csrfCookieName is the anonymous CSRF cookie used for pre-auth forms
-// (login, signup). For authenticated requests the token comes from the
-// session row via auth.Session.CSRFToken.
+// (login and the anon-invite signup form on /invites/:token). For
+// authenticated requests the token comes from the session row via
+// auth.Session.CSRFToken.
 const csrfCookieName = "mere_csrf"
 
 // authMiddleware does five things, in order, on every request:
@@ -20,7 +21,8 @@ const csrfCookieName = "mere_csrf"
 //  1. Reads the mere_session cookie; on a valid session attaches it to ctx,
 //     touches the session row (sliding expiry), and refreshes the cookie.
 //  2. Falls back to an anonymous mere_csrf cookie for the CSRF token (issued
-//     lazily so pre-auth forms — login, signup — can carry one).
+//     lazily so pre-auth forms — login and the anon-invite signup — can
+//     carry one).
 //  3. Enforces CSRF on non-GET requests to web routes. /v1/* and /mcp are
 //     exempt (bearer-authed, no cookie surface).
 //  4. Builds a per-request auth.Viewer for authenticated sessions and
@@ -121,7 +123,7 @@ func requireSession() func(http.Handler) http.Handler {
 }
 
 // requireAnonymous redirects already-authenticated users away from /login
-// and /signup so they don't re-submit credentials over a logged-in session.
+// so they don't re-submit credentials over a logged-in session.
 func requireAnonymous() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

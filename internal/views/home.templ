@@ -20,7 +20,7 @@ templ Home(session *auth.Session, groups []HomeData) {
 	@Layout("Home", session) {
 		<h1>Welcome, { session.UserEmail }</h1>
 		if len(groups) == 0 {
-			<p>You're not in any teams yet. (This shouldn't happen — signup auto-creates one.)</p>
+			<p>You're not in any teams yet. (This shouldn't happen — every user gets a personal team at creation.)</p>
 		} else {
 			for _, g := range groups {
 				<section class="team">
