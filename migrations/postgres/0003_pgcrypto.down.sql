@@ -1,0 +1,4 @@
+-- Down-migration is a no-op: pgcrypto may be relied on by operator scripts
+-- shipped out-of-band, so dropping it on a rollback would break them. If a
+-- deployment truly needs to drop the extension, do it via direct SQL after
+-- confirming no scripts depend on it.

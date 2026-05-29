@@ -1,0 +1,75 @@
+package views
+
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/jjdinho/mere-analytics/internal/auth"
+)
+
+// Layout is the shared HTML chrome for every server-rendered page. Holds the
+// global hx-headers so every htmx-triggered request forwards X-CSRF-Token,
+// and the minimal CSS that ships with v1.
+//
+// Pass session=nil for anonymous pages (login, signup); the layout adapts the
+// header nav.
+templ Layout(title string, session *auth.Session) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ title } — mere</title>
+			<link rel="stylesheet" href="/static/app.css"/>
+		</head>
+		<body hx-headers={ hxHeaders(ctx) }>
+			<header>
+				<a href="/" class="brand">mere</a>
+				if session != nil {
+					<nav>
+						<span class="email">{ session.UserEmail }</span>
+						<form method="POST" action="/logout" style="display:inline">
+							@CSRFField()
+							<button type="submit" class="link">Log out</button>
+						</form>
+					</nav>
+				} else {
+					<nav>
+						<a href="/login">Log in</a>
+						<a href="/signup">Sign up</a>
+					</nav>
+				}
+			</header>
+			<main>
+				{ children... }
+			</main>
+		</body>
+	</html>
+}
+
+// CSRFField renders the hidden form input every state-changing form must
+// include. Pulls the value from ctx (set by the auth middleware) so callers
+// never need to thread the token explicitly.
+templ CSRFField() {
+	<input type="hidden" name="csrf_token" value={ auth.CSRFTokenFrom(ctx) }/>
+}
+
+// FormError renders a small "we couldn't process that" banner above forms.
+templ FormError(msg string) {
+	if msg != "" {
+		<div class="error" role="alert">{ msg }</div>
+	}
+}
+
+// hxHeaders returns a JSON object suitable for the body's hx-headers attribute.
+// Encoded with encoding/json so any future special characters in the token
+// (currently base64url-safe) stay safely escaped.
+func hxHeaders(ctx context.Context) string {
+	b, err := json.Marshal(map[string]string{
+		auth.CSRFHeader: auth.CSRFTokenFrom(ctx),
+	})
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}

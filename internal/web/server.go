@@ -1,19 +1,33 @@
-// Package web wires the application's HTTP surface. For the step 1-2 slice
-// that surface is intentionally tiny: a healthcheck, a hello page, and a
-// static asset mount that's currently empty but reserved for later steps.
+// Package web wires the application's HTTP surface. Routes split into two
+// layers: every request goes through recover → log → authMiddleware
+// (session + CSRF). Authenticated-only routes additionally pass through
+// requireSession; the login/signup pages pass through requireAnonymous.
 package web
 
 import (
 	"log/slog"
 	"net/http"
 
+	"github.com/jjdinho/mere-analytics/internal/auth"
 	"github.com/jjdinho/mere-analytics/internal/static"
-	"github.com/jjdinho/mere-analytics/internal/views"
 )
 
-// Handler builds the application's http.Handler with logging and recovery
-// middleware applied to every route.
-func Handler(logger *slog.Logger) http.Handler {
+// Options bundles the dependencies needed to build the HTTP handler.
+// SecureCookies enables the Secure flag on session/csrf cookies — disabled
+// in dev (plaintext http on localhost) and enabled in production via env.
+type Options struct {
+	AuthService   *auth.Service
+	Logger        *slog.Logger
+	SecureCookies bool
+}
+
+// Handler builds the application's root http.Handler.
+func Handler(opts Options) http.Handler {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -21,12 +35,23 @@ func Handler(logger *slog.Logger) http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = views.Index().Render(r.Context(), w)
-	})
+	mux.Handle("GET /{$}", indexHandler())
 
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(static.FS()))))
 
-	return recoverMiddleware(logger)(logMiddleware(logger)(mux))
+	// Auth routes available only when authMiddleware ran (svc != nil).
+	if opts.AuthService != nil {
+		anon := requireAnonymous()
+		mux.Handle("GET /signup", anon(getSignup()))
+		mux.Handle("POST /signup", anon(postSignup(opts.AuthService, logger, opts.SecureCookies)))
+		mux.Handle("GET /login", anon(getLogin()))
+		mux.Handle("POST /login", anon(postLogin(opts.AuthService, logger, opts.SecureCookies)))
+		mux.Handle("POST /logout", postLogout(opts.AuthService, logger, opts.SecureCookies))
+	}
+
+	var chain http.Handler = mux
+	if opts.AuthService != nil {
+		chain = authMiddleware(opts.AuthService, logger, opts.SecureCookies)(chain)
+	}
+	return recoverMiddleware(logger)(logMiddleware(logger)(chain))
 }

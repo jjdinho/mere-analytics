@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jjdinho/mere-analytics/internal/auth"
 	"github.com/jjdinho/mere-analytics/internal/clickhouse"
 	"github.com/jjdinho/mere-analytics/internal/config"
 	mmigrate "github.com/jjdinho/mere-analytics/internal/migrate"
@@ -102,9 +103,14 @@ func run(logger *slog.Logger) error {
 	_ = (*sql.DB)(chReadonly)
 
 	// --- HTTP ---
+	authSvc := auth.NewService(pgPool)
 	srv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.Port),
-		Handler:           web.Handler(logger),
+		Addr: fmt.Sprintf(":%d", cfg.Port),
+		Handler: web.Handler(web.Options{
+			AuthService:   authSvc,
+			Logger:        logger,
+			SecureCookies: cfg.SecureCookies,
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	serveErr := make(chan error, 1)

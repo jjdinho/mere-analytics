@@ -1,0 +1,21 @@
+package views
+
+templ Login(emailValue, errMsg string) {
+	@Layout("Log in", nil) {
+		<h1>Log in</h1>
+		@FormError(errMsg)
+		<form method="POST" action="/login" autocomplete="on">
+			@CSRFField()
+			<label>
+				Email
+				<input type="email" name="email" required autocomplete="username" value={ emailValue }/>
+			</label>
+			<label>
+				Password
+				<input type="password" name="password" required autocomplete="current-password"/>
+			</label>
+			<button type="submit">Log in</button>
+		</form>
+		<p>New here? <a href="/signup">Create an account</a>.</p>
+	}
+}

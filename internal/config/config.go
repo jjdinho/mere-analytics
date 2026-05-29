@@ -11,6 +11,11 @@ import (
 type Config struct {
 	Port int `env:"PORT" envDefault:"8080"`
 
+	// SecureCookies controls the Secure flag on the session and CSRF cookies.
+	// Defaults to true (TLS-terminating proxy in front in production). Set to
+	// false locally to allow plaintext HTTP on 127.0.0.1.
+	SecureCookies bool `env:"SECURE_COOKIES" envDefault:"true"`
+
 	PostgresHost     string `env:"POSTGRES_HOST,required"`
 	PostgresPort     int    `env:"POSTGRES_PORT" envDefault:"5432"`
 	PostgresDB       string `env:"POSTGRES_DB" envDefault:"mere"`
@@ -74,6 +79,7 @@ func (c Config) validate() error {
 func (c Config) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Int("port", c.Port),
+		slog.Bool("secure_cookies", c.SecureCookies),
 		slog.String("postgres_host", c.PostgresHost),
 		slog.Int("postgres_port", c.PostgresPort),
 		slog.String("postgres_db", c.PostgresDB),

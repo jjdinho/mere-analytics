@@ -15,7 +15,7 @@ func discardLogger() *slog.Logger {
 }
 
 func TestHealthz(t *testing.T) {
-	srv := httptest.NewServer(Handler(discardLogger()))
+	srv := httptest.NewServer(Handler(Options{Logger: discardLogger()}))
 	t.Cleanup(srv.Close)
 
 	resp, err := http.Get(srv.URL + "/healthz")
@@ -33,7 +33,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestIndex(t *testing.T) {
-	srv := httptest.NewServer(Handler(discardLogger()))
+	srv := httptest.NewServer(Handler(Options{Logger: discardLogger()}))
 	t.Cleanup(srv.Close)
 
 	resp, err := http.Get(srv.URL + "/")
@@ -53,7 +53,7 @@ func TestIndex(t *testing.T) {
 func TestLogMiddleware_skipsHealthz(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	srv := httptest.NewServer(Handler(logger))
+	srv := httptest.NewServer(Handler(Options{Logger: logger}))
 	t.Cleanup(srv.Close)
 
 	// /healthz should not produce a log line.
