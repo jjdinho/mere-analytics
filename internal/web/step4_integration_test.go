@@ -21,23 +21,13 @@ import (
 	"github.com/jjdinho/mere-analytics/migrations"
 )
 
-// signupClient creates a fresh user via the real signup flow, returning a
-// cookied client + the user's email so tests can re-authenticate.
-func signupClient(t *testing.T, srv *httptest.Server, email string) *http.Client {
+// signupClient seeds a user via svc.Signup and logs them in over the real
+// /login flow, returning a cookied client ready to act as that user. The
+// public /signup route was removed — production user creation goes through
+// scripts/operator/create-user.sql or the anon-invite POST.
+func signupClient(t *testing.T, srv *httptest.Server, svc *auth.Service, email string) *http.Client {
 	t.Helper()
-	c := clientWithJar(t)
-	_, body := mustGet(t, c, srv.URL+"/signup")
-	tok := extractCSRFToken(t, body)
-	form := url.Values{"email": {email}, "password": {"correct horse battery staple"}, "csrf_token": {tok}}
-	resp, err := c.PostForm(srv.URL+"/signup", form)
-	if err != nil {
-		t.Fatalf("signup %s: %v", email, err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("signup %s: status %d want 303", email, resp.StatusCode)
-	}
-	return c
+	return seedAndLogin(t, srv, svc, email)
 }
 
 // findID scrapes a UUID from an href like /teams/<id> or /projects/<id> in
@@ -66,11 +56,11 @@ func formPostExpect(t *testing.T, c *http.Client, srv *httptest.Server, refURL, 
 }
 
 // TestHome_ListsTeamsAndProjects exercises the rebuilt /` page (Issue 5).
-// Signup creates a personal team; the page should render it and let the user
-// create a project, which then appears on the next render.
+// The seeded user has a personal team; the page should render it and let
+// the user create a project, which then appears on the next render.
 func TestHome_ListsTeamsAndProjects(t *testing.T) {
-	srv := startStack(t)
-	c := signupClient(t, srv, "alice@example.com")
+	srv, svc := startStack(t)
+	c := signupClient(t, srv, svc, "alice@example.com")
 
 	_, body := mustGet(t, c, srv.URL+"/")
 	if !strings.Contains(body, "alice@example.com") {
@@ -97,8 +87,8 @@ func TestHome_ListsTeamsAndProjects(t *testing.T) {
 // token (plaintext shown once), revoke it (gone from list), and verify the
 // list NEVER includes the plaintext.
 func TestProjectFlow_CreateTokenRevoke(t *testing.T) {
-	srv := startStack(t)
-	c := signupClient(t, srv, "alice@example.com")
+	srv, svc := startStack(t)
+	c := signupClient(t, srv, svc, "alice@example.com")
 
 	_, body := mustGet(t, c, srv.URL+"/")
 	teamID := findIDFromHref(t, body, "/teams/")
@@ -151,8 +141,8 @@ func TestProjectFlow_CreateTokenRevoke(t *testing.T) {
 // TestProject_SoftDelete_then404 verifies a soft-deleted project's GET
 // returns 404 — both for the owner and (implicitly) for everyone else.
 func TestProject_SoftDelete_then404(t *testing.T) {
-	srv := startStack(t)
-	c := signupClient(t, srv, "alice@example.com")
+	srv, svc := startStack(t)
+	c := signupClient(t, srv, svc, "alice@example.com")
 
 	_, body := mustGet(t, c, srv.URL+"/")
 	teamID := findIDFromHref(t, body, "/teams/")
@@ -181,9 +171,9 @@ func TestProject_SoftDelete_then404(t *testing.T) {
 // This is the kernel security contract test for Step 4 — new routes that
 // expose a {team_id} or {project_id} path param should be enrolled here.
 func TestCrossUserAuth_Matrix(t *testing.T) {
-	srv := startStack(t)
-	cAlice := signupClient(t, srv, "alice@example.com")
-	cBob := signupClient(t, srv, "bob@example.com")
+	srv, svc := startStack(t)
+	cAlice := signupClient(t, srv, svc, "alice@example.com")
+	cBob := signupClient(t, srv, svc, "bob@example.com")
 
 	// Bob creates a team-owned project + token for the matrix.
 	_, bobHome := mustGet(t, cBob, srv.URL+"/")
@@ -235,124 +225,175 @@ func TestCrossUserAuth_Matrix(t *testing.T) {
 	}
 }
 
-// TestInviteFlow_AnonSignsUpToJoin walks the full anon→signup→join chain
-// (Issue 8 + 12 strict).
-func TestInviteFlow_AnonSignsUpToJoin(t *testing.T) {
-	srv := startStack(t)
-	cAlice := signupClient(t, srv, "alice@example.com")
-
-	_, body := mustGet(t, cAlice, srv.URL+"/")
-	teamID := findIDFromHref(t, body, "/teams/")
+// inviteURLForTeam creates an invite as alice and returns the relative
+// path (/invites/<plaintext-token>) plus the plaintext token, for use by
+// anon-flow tests.
+func inviteURLForTeam(t *testing.T, srv *httptest.Server, cAlice *http.Client) (path, token string) {
+	t.Helper()
+	_, aliceHome := mustGet(t, cAlice, srv.URL+"/")
+	teamID := findIDFromHref(t, aliceHome, "/teams/")
 	invResp := formPostExpect(t, cAlice, srv, "/teams/"+teamID, "/teams/"+teamID+"/invites", url.Values{})
-	invBody, _ := io.ReadAll(invResp.Body)
+	body, _ := io.ReadAll(invResp.Body)
 	invResp.Body.Close()
 
-	// Find the plaintext invite URL in the rendered notice.
-	urlPat := regexp.MustCompile(`/invites/` + auth.TokenPrefix + `[A-Za-z0-9_-]{43}`)
-	m := urlPat.FindString(string(invBody))
+	pat := regexp.MustCompile(`/invites/` + auth.TokenPrefix + `[A-Za-z0-9_-]{43}`)
+	m := pat.FindString(string(body))
 	if m == "" {
-		// Fall back to looking for the full http(s) URL the page renders.
-		urlPat = regexp.MustCompile(`https?://[^"]*?/invites/` + auth.TokenPrefix + `[A-Za-z0-9_-]{43}`)
-		full := urlPat.FindString(string(invBody))
+		fullPat := regexp.MustCompile(`https?://[^"]*?/invites/` + auth.TokenPrefix + `[A-Za-z0-9_-]{43}`)
+		full := fullPat.FindString(string(body))
 		if full == "" {
-			t.Fatalf("no invite URL in team page body:\n%s", invBody)
+			t.Fatalf("no invite URL in team page body:\n%s", body)
 		}
-		idx := strings.Index(full, "/invites/")
-		m = full[idx:]
+		m = full[strings.Index(full, "/invites/"):]
 	}
-	plain := strings.TrimPrefix(m, "/invites/")
+	return m, strings.TrimPrefix(m, "/invites/")
+}
 
-	// New user (anon) hits the invite page → sees CTA to /signup?invite=:t.
+// TestInviteFlow_AnonCreatesAccountAndJoins walks the full anon → invite-
+// page → create-account-and-join chain. The signup form is rendered
+// inline on /invites/{token}; POSTing back to the same URL creates the
+// account, consumes the invite, and lands the user on the invited team.
+func TestInviteFlow_AnonCreatesAccountAndJoins(t *testing.T) {
+	srv, svc := startStack(t)
+	cAlice := signupClient(t, srv, svc, "alice@example.com")
+
+	invPath, plain := inviteURLForTeam(t, srv, cAlice)
+	_ = plain
+
+	// New anonymous user opens the invite page — should see the inline
+	// signup form (email + password fields), plus a "Log in to join" link.
 	cNewbie := clientWithJar(t)
-	_, confirmBody := mustGet(t, cNewbie, srv.URL+m)
-	if !strings.Contains(confirmBody, "Sign up to join") {
-		t.Errorf("invite page should show signup CTA, body:\n%s", confirmBody)
+	_, confirmBody := mustGet(t, cNewbie, srv.URL+invPath)
+	if !strings.Contains(confirmBody, `name="email"`) {
+		t.Errorf("invite page missing email field:\n%s", confirmBody)
 	}
-
-	// Hit /signup?invite=:t — form should carry the hidden invite field.
-	_, signupBody := mustGet(t, cNewbie, srv.URL+"/signup?invite="+plain)
-	if !strings.Contains(signupBody, `name="invite"`) {
-		t.Errorf("signup form should carry hidden invite field, body:\n%s", signupBody)
+	if !strings.Contains(confirmBody, `name="password"`) {
+		t.Errorf("invite page missing password field:\n%s", confirmBody)
 	}
-	csrf := extractCSRFToken(t, signupBody)
+	if !strings.Contains(confirmBody, "Log in to join") {
+		t.Errorf("invite page missing log-in fallback link:\n%s", confirmBody)
+	}
+	csrf := extractCSRFToken(t, confirmBody)
 
-	// Sign up with the invite. Should redirect to / (post-signup home).
+	// POST back to /invites/{token} with email + password → 303 to the
+	// invited team's page (not /, since the invited team is where the
+	// user is headed).
 	form := url.Values{
 		"email":      {"newbie@example.com"},
 		"password":   {"correct horse battery staple"},
-		"invite":     {plain},
 		"csrf_token": {csrf},
 	}
-	signupResp, err := cNewbie.PostForm(srv.URL+"/signup", form)
+	signupResp, err := cNewbie.PostForm(srv.URL+invPath, form)
 	if err != nil {
-		t.Fatalf("signup: %v", err)
+		t.Fatalf("anon invite POST: %v", err)
 	}
 	signupResp.Body.Close()
 	if signupResp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("signup status: %d want 303", signupResp.StatusCode)
+		t.Fatalf("anon invite POST status: %d want 303", signupResp.StatusCode)
+	}
+	if loc := signupResp.Header.Get("Location"); !strings.HasPrefix(loc, "/teams/") {
+		t.Errorf("redirect Location = %q, want /teams/<invited>", loc)
+	}
+	if !hasSessionCookie(t, cNewbie, srv.URL) {
+		t.Fatalf("no session cookie after anon invite signup")
 	}
 
-	// New user's home should list TWO teams now.
+	// New user's home should list TWO teams: their personal team +
+	// alice's invited team.
 	_, newHome := mustGet(t, cNewbie, srv.URL+"/")
 	if strings.Count(newHome, `href="/teams/`) < 2 {
-		t.Errorf("post-signup-with-invite home should list 2 teams, body:\n%s", newHome)
+		t.Errorf("post-invite home should list 2 teams, body:\n%s", newHome)
 	}
 }
 
-// TestInviteFlow_StrictOnInvalid (Issue 12): signup with a bogus invite
-// fails the form, no user is created.
-func TestInviteFlow_StrictOnInvalid(t *testing.T) {
-	srv := startStack(t)
-	c := clientWithJar(t)
+// TestInviteFlow_AnonDuplicateEmail asserts that an existing user's email,
+// submitted via the anon-invite form, surfaces a 409 with the re-rendered
+// form (so the visitor knows to use the "Log in to join" link instead).
+func TestInviteFlow_AnonDuplicateEmail(t *testing.T) {
+	srv, svc := startStack(t)
+	cAlice := signupClient(t, srv, svc, "alice@example.com")
 
-	bogus := auth.TokenPrefix + strings.Repeat("z", 43)
-	_, body := mustGet(t, c, srv.URL+"/signup?invite="+bogus)
-	csrf := extractCSRFToken(t, body)
+	// Pre-seed bob — same email the anon visitor will attempt to register.
+	if _, err := svc.Signup(context.Background(), auth.SignupRequest{
+		Email: "bob@example.com", Password: "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("seed bob: %v", err)
+	}
+
+	invPath, _ := inviteURLForTeam(t, srv, cAlice)
+	cAnon := clientWithJar(t)
+	_, confirmBody := mustGet(t, cAnon, srv.URL+invPath)
+	csrf := extractCSRFToken(t, confirmBody)
+
 	form := url.Values{
-		"email":      {"ghost@example.com"},
+		"email":      {"bob@example.com"},
 		"password":   {"correct horse battery staple"},
-		"invite":     {bogus},
 		"csrf_token": {csrf},
 	}
-	resp, err := c.PostForm(srv.URL+"/signup", form)
+	resp, err := cAnon.PostForm(srv.URL+invPath, form)
 	if err != nil {
-		t.Fatalf("signup: %v", err)
+		t.Fatalf("POST: %v", err)
 	}
 	respBody, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("status: %d want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("status: %d want 409", resp.StatusCode)
 	}
-	if !strings.Contains(string(respBody), "no longer valid") {
-		t.Errorf("error message missing, body:\n%s", respBody)
+	if !strings.Contains(string(respBody), "already registered") {
+		t.Errorf("body missing duplicate-email message:\n%s", respBody)
+	}
+	if hasSessionCookie(t, cAnon, srv.URL) {
+		t.Errorf("failed duplicate-email signup should not set a session")
+	}
+}
+
+// TestInviteFlow_StrictOnInvalidToken: GET /invites/<bogus> renders the
+// "no longer valid" page with 404, and POSTing to a bogus token does the
+// same instead of creating an orphan user.
+func TestInviteFlow_StrictOnInvalidToken(t *testing.T) {
+	srv, _ := startStack(t)
+	c := clientWithJar(t)
+	bogusPath := "/invites/" + auth.TokenPrefix + strings.Repeat("z", 43)
+
+	// GET shows the InviteInvalid page (404).
+	resp, body := mustGet(t, c, srv.URL+bogusPath)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET status: %d want 404", resp.StatusCode)
+	}
+	if !strings.Contains(body, "no longer valid") {
+		t.Errorf("body missing message:\n%s", body)
 	}
 
-	// And no session cookie was set.
+	// POST (no token rendered on the 404 page, so harvest one from /login)
+	// — still 404, still no session.
+	_, loginBody := mustGet(t, c, srv.URL+"/login")
+	csrf := extractCSRFToken(t, loginBody)
+	form := url.Values{
+		"email":      {"ghost@example.com"},
+		"password":   {"correct horse battery staple"},
+		"csrf_token": {csrf},
+	}
+	postResp, err := c.PostForm(srv.URL+bogusPath, form)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	postResp.Body.Close()
+	if postResp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST status: %d want 404", postResp.StatusCode)
+	}
 	if hasSessionCookie(t, c, srv.URL) {
-		t.Errorf("failed signup should not set a session cookie")
+		t.Errorf("bogus invite POST should not set a session")
 	}
 }
 
 // TestInvite_CSRFOnPost (Issue 9): the POST consume route is CSRF-protected.
 // A POST without the token returns 403, blocking the cross-site auto-join attack.
 func TestInvite_CSRFOnPost(t *testing.T) {
-	srv := startStack(t)
-	cAlice := signupClient(t, srv, "alice@example.com")
-	cBob := signupClient(t, srv, "bob@example.com")
+	srv, svc := startStack(t)
+	cAlice := signupClient(t, srv, svc, "alice@example.com")
+	cBob := signupClient(t, srv, svc, "bob@example.com")
 
-	// Alice issues an invite.
-	_, aliceHome := mustGet(t, cAlice, srv.URL+"/")
-	teamID := findIDFromHref(t, aliceHome, "/teams/")
-	invResp := formPostExpect(t, cAlice, srv, "/teams/"+teamID, "/teams/"+teamID+"/invites", url.Values{})
-	body, _ := io.ReadAll(invResp.Body)
-	invResp.Body.Close()
-	urlPat := regexp.MustCompile(`/invites/` + auth.TokenPrefix + `[A-Za-z0-9_-]{43}`)
-	invPath := urlPat.FindString(string(body))
-	if invPath == "" {
-		urlPat = regexp.MustCompile(`https?://[^"]*?/invites/` + auth.TokenPrefix + `[A-Za-z0-9_-]{43}`)
-		full := urlPat.FindString(string(body))
-		invPath = full[strings.Index(full, "/invites/"):]
-	}
+	invPath, _ := inviteURLForTeam(t, srv, cAlice)
 
 	// Bob POSTs without a CSRF token → 403, no membership created.
 	resp, err := cBob.PostForm(srv.URL+invPath, url.Values{})
@@ -369,8 +410,8 @@ func TestInvite_CSRFOnPost(t *testing.T) {
 // must_change_password=true is redirected to /account/password from
 // arbitrary protected routes, but can reach /account/password and /logout.
 func TestMustChangePassword_GateRedirects(t *testing.T) {
-	srv, pool := startStackWithPool(t)
-	c := signupClient(t, srv, "alice@example.com")
+	srv, svc, pool := startStackWithPool(t)
+	c := signupClient(t, srv, svc, "alice@example.com")
 
 	// Flip the flag directly in PG (simulates the operator reset path).
 	_, err := pool.Exec(context.Background(), `UPDATE users SET must_change_password = true WHERE email = 'alice@example.com'`)
@@ -436,7 +477,7 @@ func TestMustChangePassword_GateRedirects(t *testing.T) {
 // branch: hitting /invites/<garbage> renders the "invite no longer valid"
 // page with a 404 status.
 func TestInvalidInvite_ReturnsConfirmPageWith404(t *testing.T) {
-	srv := startStack(t)
+	srv, _ := startStack(t)
 	c := clientWithJar(t)
 
 	resp, err := c.Get(srv.URL + "/invites/" + auth.TokenPrefix + strings.Repeat("z", 43))
@@ -456,7 +497,7 @@ func TestInvalidInvite_ReturnsConfirmPageWith404(t *testing.T) {
 // startStackWithPool returns the same stack as startStack but also exposes
 // the underlying pgx pool so tests can mutate state directly (e.g. flipping
 // must_change_password to simulate the operator reset path).
-func startStackWithPool(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
+func startStackWithPool(t *testing.T) (*httptest.Server, *auth.Service, *pgxpool.Pool) {
 	t.Helper()
 	pool, cfg := testhelpers.StartPostgres(t)
 	drv, err := postgres.MigrateDriver(cfg)
@@ -474,5 +515,5 @@ func startStackWithPool(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
 		SecureCookies: false,
 	}))
 	t.Cleanup(srv.Close)
-	return srv, pool
+	return srv, svc, pool
 }

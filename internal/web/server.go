@@ -1,8 +1,11 @@
 // Package web wires the application's HTTP surface. Routes split into three
 // layers: every request goes through recover → log → authMiddleware (session
 // + viewer + CSRF + must_change_password gate). Authenticated-only routes
-// additionally pass through requireSession; the login/signup pages pass
-// through requireAnonymous.
+// additionally pass through requireSession; the login page passes through
+// requireAnonymous. There is no public signup route — the first user is
+// created by the operator via scripts/operator/create-user.sql (kamal
+// create-user) and subsequent users join via invite links rendered on
+// /invites/:token.
 package web
 
 import (
@@ -45,17 +48,19 @@ func Handler(opts Options) http.Handler {
 		anon := requireAnonymous()
 		auth := requireSession()
 
-		// Public + anonymous-only.
-		mux.Handle("GET /signup", anon(getSignup(opts.AuthService, logger)))
-		mux.Handle("POST /signup", anon(postSignup(opts.AuthService, logger, opts.SecureCookies)))
+		// Public + anonymous-only. There is no public /signup route —
+		// the first user is created by the operator via scripts/operator/
+		// create-user.sql; further users join via invite links.
 		mux.Handle("GET /login", anon(getLogin(opts.AuthService, logger)))
 		mux.Handle("POST /login", anon(postLogin(opts.AuthService, logger, opts.SecureCookies)))
 		mux.Handle("POST /logout", postLogout(opts.AuthService, logger, opts.SecureCookies))
 
-		// Invites: GET is public (the page adapts based on session); POST
-		// requires a session so the consume binds to a real user.
+		// Invites: GET is public (the page adapts to session state — anon
+		// visitors get an inline signup form, authed visitors get a confirm
+		// button). POST is also public: an anon POST creates an account +
+		// consumes the invite atomically; an authed POST just consumes.
 		mux.Handle("GET /invites/{token}", getInvite(opts.AuthService, logger))
-		mux.Handle("POST /invites/{token}", postInvite(opts.AuthService, logger))
+		mux.Handle("POST /invites/{token}", postInvite(opts.AuthService, logger, opts.SecureCookies))
 
 		// Teams + projects + tokens — all require an authenticated session.
 		mux.Handle("GET /teams/{id}", auth(getTeam(logger)))

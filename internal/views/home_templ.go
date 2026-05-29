@@ -75,7 +75,7 @@ func Home(session *auth.Session, groups []HomeData) templ.Component {
 				return templ_7745c5c3_Err
 			}
 			if len(groups) == 0 {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<p>You're not in any teams yet. (This shouldn't happen — signup auto-creates one.)</p>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<p>You're not in any teams yet. (This shouldn't happen — every user gets a personal team at creation.)</p>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
