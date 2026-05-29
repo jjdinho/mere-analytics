@@ -1,0 +1,23 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "internal/postgres/queries"
+    schema: "migrations/postgres"
+    gen:
+      go:
+        package: "db"
+        out: "internal/postgres/db"
+        sql_package: "pgx/v5"
+        emit_empty_slices: true
+        emit_pointers_for_null_types: true
+        overrides:
+          # IDs are UUID v7 generated app-side via idgen.New() as strings.
+          # Keeping the Go type as string avoids a uuid.UUID ⇄ string conversion
+          # at every callsite and matches the rest of the codebase.
+          - db_type: "uuid"
+            go_type: "string"
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              type: "string"
+              pointer: true

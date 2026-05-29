@@ -1,17 +1,11 @@
 package views
 
+// Index is the unauthenticated landing page. The brand string is asserted by
+// internal/web/server_test.go and e2e/boot_test.go, so don't paraphrase it
+// without updating those.
 templ Index() {
-	<!DOCTYPE html>
-	<html lang="en">
-		<head>
-			<meta charset="utf-8"/>
-			<meta name="viewport" content="width=device-width, initial-scale=1"/>
-			<title>mere</title>
-		</head>
-		<body>
-			<main>
-				<h1>mere — running</h1>
-			</main>
-		</body>
-	</html>
+	@Layout("mere", nil) {
+		<h1>mere — running</h1>
+		<p>Self-hostable analytics. <a href="/signup">Sign up</a> or <a href="/login">log in</a>.</p>
+	}
 }

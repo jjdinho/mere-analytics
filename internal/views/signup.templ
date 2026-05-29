@@ -1,0 +1,24 @@
+package views
+
+// Signup is the open-signup form. The deployer is expected to gate this URL
+// at the proxy/network layer (Cloudflare Access, basic auth, VPN) if they
+// want to restrict who can register — the application itself does not.
+templ Signup(emailValue, errMsg string) {
+	@Layout("Sign up", nil) {
+		<h1>Create your account</h1>
+		@FormError(errMsg)
+		<form method="POST" action="/signup" autocomplete="off">
+			@CSRFField()
+			<label>
+				Email
+				<input type="email" name="email" required autocomplete="email" value={ emailValue }/>
+			</label>
+			<label>
+				Password
+				<input type="password" name="password" required autocomplete="new-password" minlength="12" maxlength="72"/>
+			</label>
+			<button type="submit">Sign up</button>
+		</form>
+		<p>Already have an account? <a href="/login">Log in</a>.</p>
+	}
+}

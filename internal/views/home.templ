@@ -1,0 +1,13 @@
+package views
+
+import "github.com/jjdinho/mere-analytics/internal/auth"
+
+// Home is the landing page for authenticated users. v1's UI is empty here on
+// purpose — projects + tokens UI lands in step 4; this page only confirms
+// "you're logged in" until then.
+templ Home(session *auth.Session) {
+	@Layout("Home", session) {
+		<h1>Welcome, { session.UserEmail }</h1>
+		<p>You're signed in. Project and token management lands in the next step.</p>
+	}
+}

@@ -1,7 +1,7 @@
 # Analytics Server — Plan
 
 **Status:** Draft for review
-**Last updated:** 2026-05-28
+**Last updated:** 2026-05-29
 
 ## Purpose
 
@@ -554,7 +554,38 @@ Shipped in PR #2. `main.go` boots; config loaded; slog initialized; `/healthz` r
 
 Shipped in PR #2. PG + CH connection pools (admin + readonly); idempotent `CREATE DATABASE` / `CREATE USER` / `GRANT` for readonly; golang-migrate runner with dirty-state operator runbook; initial PG schema (`users`, `teams`, `team_memberships`, `projects`, `api_tokens`, `sessions`) and CH schema (`events_raw_v1`).
 
-### Step 3 — Auth
+### Step 3 — Auth [DONE]
+
+Shipped on branch `jjdinho/review-plan-next-step`. A user can sign up, log in, and log out via the web UI; the operator `reset-password.sql` works against the dev stack and is covered by integration tests.
+
+**What landed (vs. the original spec below):**
+
+- `sqlc` adopted as planned. `sqlc.yaml` at repo root; `internal/postgres/queries/*.sql` source; generated code in `internal/postgres/db/`. UUIDs kept as `string` (matches `idgen.New()`).
+- New PG migrations: `0002_sessions_csrf` (adds `csrf_token`), `0003_pgcrypto` (extension for the operator script).
+- `internal/auth/` — `password.go` (bcrypt cost 10, `ValidationError`, email normalize/validate), `csrf.go` (32-byte base64url tokens, constant-time compare), `context.go` (`Session` + CSRF context helpers), `service.go` (atomic Signup tx; Authenticate; session create/lookup/touch/destroy with 7-day sliding window, 30-day hard cap).
+- `internal/web/auth_middleware.go` — session-cookie middleware (sliding-expiry touch, refresh on each request), anonymous `mere_csrf` cookie fallback for pre-auth forms, CSRF enforcement that exempts `/v1/*` and `/mcp`.
+- `internal/web/handlers.go` — `/signup`, `/login`, `/logout` handlers.
+- `internal/web/server.go` refactored to `web.Handler(Options{AuthService, Logger, SecureCookies})`.
+- Views: `layout.templ` (`@CSRFField()` helper + global `hx-headers`), `signup.templ`, `login.templ`, `home.templ`, refreshed `index.templ`, plus `internal/static/app.css`.
+- `config.SecureCookies` env (`SECURE_COOKIES`, default `true`); `scripts/dev` sets it to `false` for plaintext localhost.
+- `scripts/operator/reset-password.sql` — bcrypt cost 10 via pgcrypto; sets `must_change_password=true`; raises on unknown email (non-zero exit). Implementation note: `psql ':var'` substitution does not fire inside `$$`-quoted `DO` blocks, so parameters are stashed via `set_config(..., true)` and recovered with `current_setting(...)`.
+
+**Deferred to a later step (with reason):**
+
+- `internal/auth/viewer.go` — explicitly scoped to step 4 ("Teams + projects + tokens") in the spec; nothing in step 3 needs it.
+- `must_change_password` enforcement at login — column exists and the operator script sets it; gating login behind a forced password-change page is part of the post-reset UX and was not required by the step 3 "done when" line. Capture as a step-4-or-later UX item.
+- `must_change_password` flag is wired through `auth.Session` but not yet displayed in the UI.
+
+**Tests delivered (all green):**
+
+- Unit (`internal/auth/`): bcrypt round-trip, length/format validation, email normalization, CSRF token shape + equality (incl. empty fail-closed), sliding-window/hard-cap math at boundaries.
+- Integration (testcontainers Postgres, `internal/auth/`): Signup atomicity across user+team+membership; duplicate-email → `ErrEmailTaken` (case-insensitive); short password → `ValidationError`; Authenticate ok/invalid (both wrong-password and unknown-email collapsed to `ErrInvalidCredentials`); session create/lookup/destroy; expired session returns `ErrSessionExpired` and is opportunistically deleted; touch extends within cap.
+- HTTP integration (`internal/web/auth_integration_test.go`): signup → home renders email; login sets cookie; logout destroys it; invalid creds → 401 + no cookie; missing CSRF token → 403; wrong CSRF token → 403; duplicate-email signup → 409; templ escapes attacker-controlled email (`<img src=x>@...` rendered as `&lt;img src=x&gt;`).
+- Operator (`internal/auth/reset_password_test.go`): unknown email → non-zero exit + "no user with email" stderr; known email → user can log in with new password and not the old one; lookup is case-insensitive.
+
+---
+
+**Original spec for reference:**
 
 **Goal:** A user can sign up, log in, log out via the web UI. An operator can reset a locked-out user's password via `kamal reset-password`.
 
