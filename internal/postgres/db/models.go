@@ -39,6 +39,17 @@ type Team struct {
 	CreatedAt pgtype.Timestamptz
 }
 
+type TeamInvite struct {
+	ID         string
+	TeamID     string
+	CreatedBy  string
+	TokenHash  string
+	ExpiresAt  pgtype.Timestamptz
+	ConsumedAt pgtype.Timestamptz
+	ConsumedBy *string
+	CreatedAt  pgtype.Timestamptz
+}
+
 type TeamMembership struct {
 	TeamID   string
 	UserID   string

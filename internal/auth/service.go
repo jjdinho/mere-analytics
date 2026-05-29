@@ -56,6 +56,18 @@ var ErrSessionNotFound = errors.New("session not found")
 // expires_at is in the past.
 var ErrSessionExpired = errors.New("session expired")
 
+// ErrInviteInvalid is returned by ConsumeInvite / SignupWithInvite when the
+// invite token doesn't resolve to an active, unexpired row. The four miss
+// cases — unknown, consumed, expired, malformed — are collapsed for the
+// same enumeration defense as ErrNotVisible.
+var ErrInviteInvalid = errors.New("invite is no longer valid")
+
+// ErrCurrentPasswordWrong is returned by ChangePassword when the caller
+// supplied the wrong current password. Distinguished from ErrInvalidCredentials
+// because the user is already authenticated; the form renders a specific
+// "current password is incorrect" message.
+var ErrCurrentPasswordWrong = errors.New("current password is incorrect")
+
 // Service bundles the dependencies needed for password / session operations.
 type Service struct {
 	pool          *pgxpool.Pool
@@ -297,4 +309,193 @@ func isUniqueViolation(err error, constraint string) bool {
 		return false
 	}
 	return pgErr.ConstraintName == constraint
+}
+
+// Queries exposes the service's sqlc handle. The web middleware uses this to
+// build per-request viewers (auth.Viewer) without re-wiring the pool.
+func (s *Service) Queries() *db.Queries { return s.queries }
+
+// ──────────────────────────────────────────────────────────────────────
+// Invite consume
+// ──────────────────────────────────────────────────────────────────────
+
+// ConsumeInvite atomically burns the invite token and adds userID to the
+// team, in a single transaction:
+//
+//   BEGIN
+//     UPDATE team_invites SET consumed_at=NOW(), consumed_by=$user
+//       WHERE token_hash=$h AND consumed_at IS NULL AND expires_at > NOW()
+//       RETURNING team_id                       ──┐
+//     INSERT INTO team_memberships ...           │  same tx
+//   COMMIT                                       └──┘
+//
+// Outcomes (Issues 7, 10):
+//   - invite valid + user not yet a member  → membership created, returns team
+//   - invite valid + user already a member  → silent success, invite burned
+//   - invite consumed/expired/unknown       → ErrInviteInvalid
+func (s *Service) ConsumeInvite(ctx context.Context, userID, plaintextToken string) (db.Team, error) {
+	hashHex := HashToken(plaintextToken)
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return db.Team{}, fmt.Errorf("invite tx begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := s.queries.WithTx(tx)
+
+	invite, err := q.ConsumeInviteByHash(ctx, db.ConsumeInviteByHashParams{
+		TokenHash:  hashHex,
+		ConsumedBy: &userID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.Team{}, ErrInviteInvalid
+	}
+	if err != nil {
+		return db.Team{}, fmt.Errorf("invite consume: %w", err)
+	}
+
+	// Insert membership via ON CONFLICT DO NOTHING — tolerates "already a
+	// member" without aborting the transaction (Issue 10 silent success).
+	if err := q.CreateTeamMembershipIfMissing(ctx, db.CreateTeamMembershipIfMissingParams{
+		TeamID: invite.TeamID,
+		UserID: userID,
+	}); err != nil {
+		return db.Team{}, fmt.Errorf("invite membership insert: %w", err)
+	}
+
+	team, err := q.GetTeamByID(ctx, invite.TeamID)
+	if err != nil {
+		return db.Team{}, fmt.Errorf("invite team fetch: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return db.Team{}, fmt.Errorf("invite tx commit: %w", err)
+	}
+	return team, nil
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Signup with invite (Issue 12 — strict)
+// ──────────────────────────────────────────────────────────────────────
+
+// SignupWithInvite runs the standard signup tx and, if an invite token is
+// supplied, consumes it in the same tx. If the invite is invalid at POST
+// time, the entire signup is aborted with ErrInviteInvalid — Issue 12's
+// strict path. Callers re-render the form with the invite cleared so the
+// user can submit without it.
+//
+// When invitePlaintext == "" this is equivalent to Signup().
+func (s *Service) SignupWithInvite(ctx context.Context, req SignupRequest, invitePlaintext string) (*SignupResult, error) {
+	if invitePlaintext == "" {
+		return s.Signup(ctx, req)
+	}
+
+	email := NormalizeEmail(req.Email)
+	if err := ValidateEmail(email); err != nil {
+		return nil, err
+	}
+	if err := ValidatePassword(req.Password); err != nil {
+		return nil, err
+	}
+	hash, err := HashPassword(req.Password)
+	if err != nil {
+		return nil, fmt.Errorf("hash password: %w", err)
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := s.queries.WithTx(tx)
+
+	user, err := q.CreateUser(ctx, db.CreateUserParams{
+		ID:                 idgen.New(),
+		Email:              email,
+		PasswordHash:       hash,
+		MustChangePassword: false,
+	})
+	if err != nil {
+		if isUniqueViolation(err, "users_email_lower_idx") {
+			return nil, ErrEmailTaken
+		}
+		return nil, fmt.Errorf("create user: %w", err)
+	}
+
+	personal, err := q.CreateTeam(ctx, db.CreateTeamParams{
+		ID:   idgen.New(),
+		Name: defaultTeamName(email),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create team: %w", err)
+	}
+	if err := q.CreateTeamMembership(ctx, db.CreateTeamMembershipParams{
+		TeamID: personal.ID,
+		UserID: user.ID,
+	}); err != nil {
+		return nil, fmt.Errorf("create membership: %w", err)
+	}
+
+	// Consume the invite inside the same tx. Failure aborts the whole signup
+	// so the user is bounced back to the form (Issue 12 strict).
+	invitedHash := HashToken(invitePlaintext)
+	consumedID := user.ID
+	invite, err := q.ConsumeInviteByHash(ctx, db.ConsumeInviteByHashParams{
+		TokenHash:  invitedHash,
+		ConsumedBy: &consumedID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrInviteInvalid
+	}
+	if err != nil {
+		return nil, fmt.Errorf("signup invite consume: %w", err)
+	}
+	// ON CONFLICT DO NOTHING for consistency with ConsumeInvite — "already a
+	// member" can't happen on a fresh signup but matches the same rule.
+	if err := q.CreateTeamMembershipIfMissing(ctx, db.CreateTeamMembershipIfMissingParams{
+		TeamID: invite.TeamID,
+		UserID: user.ID,
+	}); err != nil {
+		return nil, fmt.Errorf("signup invite membership: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return &SignupResult{User: user, Team: personal}, nil
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Change password
+// ──────────────────────────────────────────────────────────────────────
+
+// ChangePassword swaps a user's password after verifying the current one,
+// and clears must_change_password on success. Length policy is enforced via
+// ValidatePassword (returns *ValidationError so the form can surface it).
+//
+// The current-password check is the same as Authenticate without the
+// email-collapse — we already know the userID from the session.
+func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
+	if err := ValidatePassword(newPassword); err != nil {
+		return err
+	}
+	user, err := s.queries.GetUserByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("change password: lookup user: %w", err)
+	}
+	if !VerifyPassword(user.PasswordHash, currentPassword) {
+		return ErrCurrentPasswordWrong
+	}
+	newHash, err := HashPassword(newPassword)
+	if err != nil {
+		return fmt.Errorf("change password: hash: %w", err)
+	}
+	if err := s.queries.UpdateUserPassword(ctx, db.UpdateUserPasswordParams{
+		ID:                 userID,
+		PasswordHash:       newHash,
+		MustChangePassword: false,
+	}); err != nil {
+		return fmt.Errorf("change password: update: %w", err)
+	}
+	return nil
 }

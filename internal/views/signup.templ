@@ -3,12 +3,23 @@ package views
 // Signup is the open-signup form. The deployer is expected to gate this URL
 // at the proxy/network layer (Cloudflare Access, basic auth, VPN) if they
 // want to restrict who can register — the application itself does not.
-templ Signup(emailValue, errMsg string) {
+//
+// invitePlaintext is the optional invite token from ?invite=:t (Issue 8); a
+// non-empty value renders an explanatory header and threads the token
+// through the form as a hidden field so signup-success can consume it.
+templ Signup(emailValue, errMsg, invitePlaintext, inviteTeamName string) {
 	@Layout("Sign up", nil) {
-		<h1>Create your account</h1>
+		if inviteTeamName != "" {
+			<h1>Sign up to join { inviteTeamName }</h1>
+		} else {
+			<h1>Create your account</h1>
+		}
 		@FormError(errMsg)
 		<form method="POST" action="/signup" autocomplete="off">
 			@CSRFField()
+			if invitePlaintext != "" {
+				<input type="hidden" name="invite" value={ invitePlaintext }/>
+			}
 			<label>
 				Email
 				<input type="email" name="email" required autocomplete="email" value={ emailValue }/>
@@ -19,6 +30,10 @@ templ Signup(emailValue, errMsg string) {
 			</label>
 			<button type="submit">Sign up</button>
 		</form>
-		<p>Already have an account? <a href="/login">Log in</a>.</p>
+		if invitePlaintext != "" {
+			<p>Already have an account? <a href={ templ.URL("/login?invite=" + invitePlaintext) }>Log in to join</a>.</p>
+		} else {
+			<p>Already have an account? <a href="/login">Log in</a>.</p>
+		}
 	}
 }

@@ -622,7 +622,60 @@ Shipped on branch `jjdinho/review-plan-next-step`. A user can sign up, log in, a
 
 **Done when:** A user can sign up, log in, see a logged-in page, log out. `reset-password` kamal alias works against the local docker-compose stack.
 
-### Step 4 — Teams + projects + tokens
+### Step 4 — Teams + projects + tokens [DONE]
+
+Shipped on branch `jjdinho/check-build-progress`. A logged-in user can view their teams, create projects, issue/revoke API tokens, generate invite links, and join teams via the invite-confirm flow. The forced-password-change interstitial is wired into the same `authMiddleware`.
+
+**What landed (vs. the original spec below):**
+
+- `internal/auth/viewer.go` — per-request `*Viewer` attached to ctx by `authMiddleware`; fluent chains `Teams(ctx).ByID(id) / List() / MembersOf(id)`, `Projects(ctx).ByID(id) / ListForTeam / ListForTeams / Create / SoftDelete`, `Tokens(ctx).ListForProject / Create / Revoke`, plus `Viewer.CreateInvite(ctx, teamID, now)`. Membership miss returns typed **`auth.ErrNotVisible`** (not `pgx.ErrNoRows` — handlers `errors.Is → 404`).
+- `internal/auth/tokens.go` — `GenerateToken()` → `"mere_pat_" + base64.RawURLEncoding(32 bytes)` = exactly 52 chars; `HashToken` (sha256 hex); `LooksLikeAPIToken` for the future bearer middleware (Step 5).
+- `internal/auth/name.go` — generic `ValidateName(label, value)` (trim + non-empty + ≤100), used by team/project/token forms.
+- `internal/auth/service.go` extended — `ConsumeInvite(ctx, userID, plaintext)` atomic tx (UPDATE invite + ON CONFLICT DO NOTHING membership + GetTeamByID, one tx); `SignupWithInvite(ctx, req, invitePlaintext)` strict path (invalid invite aborts the whole signup tx); `ChangePassword`; `Queries()` accessor for middleware viewer construction; new `team_memberships_pkey` tolerance via the new `CreateTeamMembershipIfMissing` query.
+- `internal/web/auth_middleware.go` — attaches `*Viewer` to ctx after session; **`must_change_password` gate**: flagged sessions redirect to `/account/password` from every route except the whitelist (`/account/password`, `/logout`, `/static/*`).
+- New handlers: `internal/web/teams_handlers.go`, `projects_handlers.go`, `invites_handlers.go`, `account_handlers.go`, plus `util.go` (`absoluteURL`).
+- Routes registered in `internal/web/server.go`: `/teams/{id}`, `/teams/{id}/invites`, `/teams/{id}/projects`, `/projects/{id}`, `/projects/{id}/delete`, `/projects/{id}/tokens`, `/projects/{id}/tokens/{tid}/revoke`, `/invites/{token}` (GET public + POST authed), `/account/password` (GET+POST). Signup + login extended for `?invite=:t` carryover.
+- Views: `home.templ` rebuilt as flat teams×projects landing; new `team_show.templ`, `project_show.templ`, `invite_confirm.templ`, `invite_invalid` page, `account_password.templ` (with explicit "Your password was reset by an operator" banner driven by `session.MustChangePassword`). `signup.templ` / `login.templ` extended for invite carryover.
+- New PG migration `0004_team_invites` — table + partial unique index `team_invites_token_hash_active_idx WHERE consumed_at IS NULL` (mirrors `api_tokens` pattern + free collision insurance) + listing index.
+- New sqlc query files: `projects.sql`, `api_tokens.sql`, `team_invites.sql`; `teams.sql` extended with `GetTeamForUser`, `ListMembersForTeamForUser`, `IsMemberOfTeam`, `CreateTeamMembershipIfMissing`. All membership-gated via `JOIN team_memberships` or `WHERE EXISTS`; soft-deleted projects filtered everywhere.
+
+**Decisions made during plan-eng-review (deviations from the original spec):**
+
+- Package layout: **no `/internal/projects/` package**. Project/token CRUD goes through the viewer; transactional ops (invite consume, signup-with-invite) live on `auth.Service`. Avoids a passthrough abstraction over sqlc.
+- Viewer construction: **per-request `*Viewer` in ctx**, built by `authMiddleware`. Callers use `auth.ViewerFrom(ctx).Projects(ctx).ByID(id)`. Not the literal `viewer.Projects(ctx)` package-level free chain from the original spec — would have required the queries pool in ctx (invisible magic).
+- Viewer error contract: **typed `auth.ErrNotVisible`** instead of bare `pgx.ErrNoRows` (single sentinel for membership-miss; preserves room to log/metric "not visible" vs. "doesn't exist" if needed later).
+- Token plaintext display: **render-on-POST** (no PRG, no cookie/DB flash). The "exactly once" semantic maps literally to "one response, then it's gone." Skipped the `hx-disable-elt` double-click affordance — render-on-POST already makes a refresh inert.
+- Invite consume HTTP shape: **GET-confirm + POST-consume** (CSRF-protected). Blocks the cross-site auto-join attack that a GET-mutates-state design would enable.
+- Anonymous-invite carryover: **query-param chain** (`/invites/:t → /signup?invite=:t` with hidden field). No cookie magic, no stale-cookie ghosts.
+- Already-a-member invite consume: **silent success, invite burned, banner**. Matches user mental model.
+- Signup-with-invalid-invite at POST: **strict** — signup fails with form error, user re-submits without invite. Preserves "intent honored or not at all" semantics.
+- Home page IA: **flat home** at `/` (teams × projects), bounded 2-query (`ListTeamsForUser` + `ListProjectsForTeams(=ANY(ids))`) to eliminate N+1 footgun.
+- `must_change_password` gate: **inside `authMiddleware`** (one middleware decides session + viewer + CSRF + freshness), not a separate `requireFreshPassword` wrap.
+- Bearer-auth lookup: **deferred to Step 5** entirely. No `LookupTokenForBearer` helper in Step 4.
+
+**Tests delivered (all green, `-race` clean on the concurrency tests):**
+
+- Unit (`internal/auth/`): `tokens_test.go` (format `len == 52`, prefix, base64url alphabet, hash determinism, plaintext uniqueness, `LooksLikeAPIToken` table); `name_test.go` (trim, empty/whitespace-only/over-max, label embedding).
+- Integration (testcontainers PG, `internal/auth/`): viewer cross-user (Alice's team is `ErrNotVisible` to Bob); project soft-delete hides from owner and idempotent on second call; token plaintext never echoed in `ListForProject`; revoke idempotent; cross-user revoke `ErrNotVisible`; bounded-2-query `ListForTeams` (empty input no-op).
+- Invite integration (`internal/auth/invite_test.go`): happy path; invalid token → `ErrInviteInvalid`; already-consumed → `ErrInviteInvalid`; **already-member → silent success + invite burned**; **concurrent goroutine race** (two distinct users, `chan struct{}` start gate, asserts exactly one winner); signup-with-invalid-invite → tx rollback (no user lands); signup-with-valid-invite → user in two teams + invite consumed; `ChangePassword` happy + wrong-current + short-new + old-password-no-longer-works.
+- HTTP integration (`internal/web/step4_integration_test.go`): home lists teams + projects, creating a project shows up on next render; project token create returns plaintext exactly once + subsequent GET to project page does NOT contain the plaintext or even the `mere_pat_` prefix (negative leakage assertion); soft-delete then GET → 404; **cross-user authorization matrix** (Alice tries 7 routes against Bob's UUIDs, all return 404 — parameterized subtests, new routes enroll here); anon `/invites/:t` → signup CTA → /signup?invite=:t hidden field → submit → user lands with 2 teams; strict-on-invalid-invite (400 + form message); CSRF on invite POST returns 403; **`must_change_password` gate** — flagged session redirects `/` → `/account/password`, `/account/password` reachable with "reset by an operator" banner, successful change clears flag and home is reachable again; invalid invite token renders the "no longer valid" page with 404.
+- Schema (`internal/postgres/postgres_test.go`): updated table set + added `team_invites_token_hash_active_idx` and `team_invites_team_id_idx` to the index assertion.
+
+**Bugs caught + fixed during implementation:**
+
+- PG `25P02` (current transaction is aborted) inside `ConsumeInvite` when the `team_memberships` insert hit `team_memberships_pkey` for an already-member caller. Fix: new sqlc query `CreateTeamMembershipIfMissing` using `INSERT ... ON CONFLICT (team_id, user_id) DO NOTHING`. Applied to both `ConsumeInvite` and `SignupWithInvite` for consistency.
+- Templ parser refused string concatenation inside `@Layout("Join "+data.TeamName, session)` — moved the title into the data struct as a precomputed `PageTitle` field.
+
+**Deferred to a later step (with reason):**
+
+- Member removal from team (TODOS.md item) — closes the membership-lifecycle loop but no self-hoster has hit it yet.
+- API token expiry (TODOS.md item) — tokens are forever-valid until manually revoked; standard hygiene but not v1-blocking.
+- Revoked-tokens audit view (TODOS.md item) — needs Step 5's bearer middleware to add `last_used_at` for the view to carry real signal.
+- Bearer-auth lookup function — owned by Step 5 (its first consumer is `/v1/ingest`).
+
+---
+
+**Original spec for reference:**
 
 **Goal:** A logged-in user can create teams, invite members, create projects, issue / revoke API tokens.
 
