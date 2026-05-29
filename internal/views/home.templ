@@ -1,13 +1,50 @@
 package views
 
-import "github.com/jjdinho/mere-analytics/internal/auth"
+import (
+	"github.com/jjdinho/mere-analytics/internal/auth"
+	"github.com/jjdinho/mere-analytics/internal/postgres/db"
+)
 
-// Home is the landing page for authenticated users. v1's UI is empty here on
-// purpose — projects + tokens UI lands in step 4; this page only confirms
-// "you're logged in" until then.
-templ Home(session *auth.Session) {
+// HomeData groups the per-team project list for the rebuilt home page
+// (Issue 5). The handler runs Teams.List + Projects.ListForTeams and groups
+// by team_id in Go before rendering.
+type HomeData struct {
+	Team     db.Team
+	Projects []db.Project
+}
+
+// Home is the post-login landing page. Lists every team the viewer belongs
+// to, each with its projects + an action to create a new one. Replaces the
+// step-3 placeholder that just said "you're signed in".
+templ Home(session *auth.Session, groups []HomeData) {
 	@Layout("Home", session) {
 		<h1>Welcome, { session.UserEmail }</h1>
-		<p>You're signed in. Project and token management lands in the next step.</p>
+		if len(groups) == 0 {
+			<p>You're not in any teams yet. (This shouldn't happen — signup auto-creates one.)</p>
+		} else {
+			for _, g := range groups {
+				<section class="team">
+					<h2>
+						<a href={ templ.URL("/teams/" + g.Team.ID) }>{ g.Team.Name }</a>
+					</h2>
+					if len(g.Projects) == 0 {
+						<p class="muted">No projects yet.</p>
+					} else {
+						<ul class="projects">
+							for _, p := range g.Projects {
+								<li>
+									<a href={ templ.URL("/projects/" + p.ID) }>{ p.Name }</a>
+								</li>
+							}
+						</ul>
+					}
+					<form method="POST" action={ templ.URL("/teams/" + g.Team.ID + "/projects") } class="inline-create">
+						@CSRFField()
+						<input type="text" name="name" placeholder="New project name" required maxlength="100"/>
+						<button type="submit">Create project</button>
+					</form>
+				</section>
+			}
+		}
 	}
 }

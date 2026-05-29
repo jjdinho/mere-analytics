@@ -1,0 +1,64 @@
+package views
+
+import (
+	"github.com/jjdinho/mere-analytics/internal/auth"
+	"github.com/jjdinho/mere-analytics/internal/postgres/db"
+)
+
+// ProjectShowData carries the project detail view. NewToken is non-empty
+// only on the render-on-POST response after creating a token (Issue 3 —
+// plaintext shown exactly once).
+type ProjectShowData struct {
+	Project  db.Project
+	Tokens   []db.ApiToken
+	NewToken string // plaintext "mere_pat_..."; blank in steady state
+	ErrMsg   string
+}
+
+templ ProjectShow(session *auth.Session, data ProjectShowData) {
+	@Layout(data.Project.Name, session) {
+		<h1>{ data.Project.Name }</h1>
+		@FormError(data.ErrMsg)
+		if data.NewToken != "" {
+			<div class="notice" role="status">
+				<p><strong>API token issued.</strong> Copy it now — it won't be shown again.</p>
+				<input type="text" value={ data.NewToken } readonly onclick="this.select()" class="copybox" data-test="new-token"/>
+			</div>
+		}
+
+		<h2>API tokens</h2>
+		if len(data.Tokens) == 0 {
+			<p class="muted">No active tokens.</p>
+		} else {
+			<ul class="tokens">
+				for _, t := range data.Tokens {
+					<li>
+						<span>{ t.Name }</span>
+						<form method="POST" action={ templ.URL("/projects/" + data.Project.ID + "/tokens/" + t.ID + "/revoke") } style="display:inline">
+							@CSRFField()
+							<button type="submit" class="danger">Revoke</button>
+						</form>
+					</li>
+				}
+			</ul>
+		}
+
+		<h3>Issue a new token</h3>
+		<form method="POST" action={ templ.URL("/projects/" + data.Project.ID + "/tokens") }>
+			@CSRFField()
+			<label>
+				Name
+				<input type="text" name="name" required maxlength="100" placeholder="ci-pipeline"/>
+			</label>
+			<button type="submit">Issue token</button>
+		</form>
+
+		<h2>Danger zone</h2>
+		<form method="POST" action={ templ.URL("/projects/" + data.Project.ID + "/delete") } onsubmit="return confirm('Delete this project? You can recover via the operator console.');">
+			@CSRFField()
+			<button type="submit" class="danger">Delete project</button>
+		</form>
+
+		<p><a href="/">Back to home</a></p>
+	}
+}

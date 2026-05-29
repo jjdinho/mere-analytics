@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createTeam = `-- name: CreateTeam :one
@@ -42,6 +44,25 @@ func (q *Queries) CreateTeamMembership(ctx context.Context, arg CreateTeamMember
 	return err
 }
 
+const createTeamMembershipIfMissing = `-- name: CreateTeamMembershipIfMissing :exec
+INSERT INTO team_memberships (team_id, user_id)
+VALUES ($1, $2)
+ON CONFLICT (team_id, user_id) DO NOTHING
+`
+
+type CreateTeamMembershipIfMissingParams struct {
+	TeamID string
+	UserID string
+}
+
+// Used by invite-consume and signup-with-invite where "user already in this
+// team" must be silently tolerated (Issue 10). Avoids the 25P02 abort that
+// a raw PK-violation would cause inside a transaction.
+func (q *Queries) CreateTeamMembershipIfMissing(ctx context.Context, arg CreateTeamMembershipIfMissingParams) error {
+	_, err := q.db.Exec(ctx, createTeamMembershipIfMissing, arg.TeamID, arg.UserID)
+	return err
+}
+
 const getTeamByID = `-- name: GetTeamByID :one
 SELECT id, name, created_at
 FROM teams
@@ -53,6 +74,97 @@ func (q *Queries) GetTeamByID(ctx context.Context, id string) (Team, error) {
 	var i Team
 	err := row.Scan(&i.ID, &i.Name, &i.CreatedAt)
 	return i, err
+}
+
+const getTeamForUser = `-- name: GetTeamForUser :one
+SELECT t.id, t.name, t.created_at
+FROM teams t
+JOIN team_memberships tm ON tm.team_id = t.id
+WHERE t.id = $1 AND tm.user_id = $2
+`
+
+type GetTeamForUserParams struct {
+	ID     string
+	UserID string
+}
+
+// Membership-gated read used by viewer.Teams().ByID(). Zero rows → ErrNotVisible.
+func (q *Queries) GetTeamForUser(ctx context.Context, arg GetTeamForUserParams) (Team, error) {
+	row := q.db.QueryRow(ctx, getTeamForUser, arg.ID, arg.UserID)
+	var i Team
+	err := row.Scan(&i.ID, &i.Name, &i.CreatedAt)
+	return i, err
+}
+
+const isMemberOfTeam = `-- name: IsMemberOfTeam :one
+SELECT EXISTS (
+    SELECT 1 FROM team_memberships
+    WHERE team_id = $1 AND user_id = $2
+)
+`
+
+type IsMemberOfTeamParams struct {
+	TeamID string
+	UserID string
+}
+
+// Cheap predicate for the invite-confirm page ("you are already a member").
+func (q *Queries) IsMemberOfTeam(ctx context.Context, arg IsMemberOfTeamParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isMemberOfTeam, arg.TeamID, arg.UserID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const listMembersForTeamForUser = `-- name: ListMembersForTeamForUser :many
+SELECT u.id, u.email, u.created_at, tm.joined_at
+FROM team_memberships tm
+JOIN users u ON u.id = tm.user_id
+WHERE tm.team_id = $1
+  AND EXISTS (
+      SELECT 1 FROM team_memberships caller
+      WHERE caller.team_id = $1 AND caller.user_id = $2
+  )
+ORDER BY tm.joined_at ASC
+`
+
+type ListMembersForTeamForUserParams struct {
+	TeamID string
+	UserID string
+}
+
+type ListMembersForTeamForUserRow struct {
+	ID        string
+	Email     string
+	CreatedAt pgtype.Timestamptz
+	JoinedAt  pgtype.Timestamptz
+}
+
+// Returns members of $1 if the caller ($2) is themselves a member; otherwise
+// zero rows (which surfaces as ErrNotVisible at the viewer).
+func (q *Queries) ListMembersForTeamForUser(ctx context.Context, arg ListMembersForTeamForUserParams) ([]ListMembersForTeamForUserRow, error) {
+	rows, err := q.db.Query(ctx, listMembersForTeamForUser, arg.TeamID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMembersForTeamForUserRow{}
+	for rows.Next() {
+		var i ListMembersForTeamForUserRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.CreatedAt,
+			&i.JoinedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listTeamsForUser = `-- name: ListTeamsForUser :many

@@ -15,16 +15,19 @@ import (
 // session row via auth.Session.CSRFToken.
 const csrfCookieName = "mere_csrf"
 
-// authMiddleware does three things, in order, on every request:
+// authMiddleware does five things, in order, on every request:
 //
 //  1. Reads the mere_session cookie; on a valid session attaches it to ctx,
 //     touches the session row (sliding expiry), and refreshes the cookie.
 //  2. Falls back to an anonymous mere_csrf cookie for the CSRF token (issued
 //     lazily so pre-auth forms — login, signup — can carry one).
 //  3. Enforces CSRF on non-GET requests to web routes. /v1/* and /mcp are
-//     exempt (bearer-authed, no cookie surface). For state-changing requests
-//     the submitted token (header or form field) must match the contextual
-//     token in constant time.
+//     exempt (bearer-authed, no cookie surface).
+//  4. Builds a per-request auth.Viewer for authenticated sessions and
+//     attaches it to ctx so handlers can call ViewerFrom(ctx).Projects() etc.
+//  5. Enforces the must_change_password gate: if the session has the flag
+//     set and the request isn't to /account/password, /logout, or /static/*,
+//     redirects to /account/password (Issue 4).
 //
 // On CSRF failure responds 403 immediately; the wrapped handler is never
 // invoked.
@@ -74,9 +77,32 @@ func authMiddleware(svc *auth.Service, logger *slog.Logger, secureCookies bool) 
 
 			ctx = auth.WithSession(ctx, session)
 			ctx = auth.WithCSRFToken(ctx, csrfToken)
+			if session != nil {
+				ctx = auth.WithViewer(ctx, auth.NewViewer(svc.Queries(), session.UserID))
+
+				// must_change_password gate (Issue 4). Allow the password-change
+				// page (so the user can resolve the flag), /logout (escape
+				// hatch), and /static/* (avoid breaking the CSS reference).
+				if session.MustChangePassword && !mustChangePasswordAllowed(r) {
+					http.Redirect(w, r, "/account/password", http.StatusSeeOther)
+					return
+				}
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// mustChangePasswordAllowed reports whether the request may proceed despite
+// the user's flagged session — the change-password form itself, logout, and
+// static assets. Everything else gets redirected to /account/password.
+func mustChangePasswordAllowed(r *http.Request) bool {
+	p := r.URL.Path
+	switch p {
+	case "/account/password", "/logout":
+		return true
+	}
+	return strings.HasPrefix(p, "/static/")
 }
 
 // requireSession returns a middleware that 302-redirects to /login when no

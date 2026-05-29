@@ -1,0 +1,46 @@
+package views
+
+import (
+	"github.com/jjdinho/mere-analytics/internal/auth"
+	"github.com/jjdinho/mere-analytics/internal/postgres/db"
+)
+
+// TeamShowData carries the bits the team-settings page needs. NewInvite is
+// non-empty only on the render-on-POST response after creating an invite —
+// the plaintext URL is shown exactly once (mirrors the token UX in Issue 3,
+// applied to invites for symmetry).
+type TeamShowData struct {
+	Team      db.Team
+	Members   []db.ListMembersForTeamForUserRow
+	NewInvite string // full URL ("https://host/invites/<plaintext>"); blank if none just issued
+	ErrMsg    string
+}
+
+templ TeamShow(session *auth.Session, data TeamShowData) {
+	@Layout(data.Team.Name, session) {
+		<h1>{ data.Team.Name }</h1>
+		@FormError(data.ErrMsg)
+		if data.NewInvite != "" {
+			<div class="notice" role="status">
+				<p><strong>Invite link generated.</strong> Copy it now — it won't be shown again.</p>
+				<input type="text" value={ data.NewInvite } readonly onclick="this.select()" class="copybox"/>
+			</div>
+		}
+
+		<h2>Members</h2>
+		<ul class="members">
+			for _, m := range data.Members {
+				<li>{ m.Email }</li>
+			}
+		</ul>
+
+		<h2>Invite a teammate</h2>
+		<p>Generate a one-shot link the invitee opens to join this team. Link expires in 7 days.</p>
+		<form method="POST" action={ templ.URL("/teams/" + data.Team.ID + "/invites") }>
+			@CSRFField()
+			<button type="submit">Generate invite link</button>
+		</form>
+
+		<p><a href="/">Back to home</a></p>
+	}
+}

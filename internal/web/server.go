@@ -1,7 +1,8 @@
-// Package web wires the application's HTTP surface. Routes split into two
-// layers: every request goes through recover → log → authMiddleware
-// (session + CSRF). Authenticated-only routes additionally pass through
-// requireSession; the login/signup pages pass through requireAnonymous.
+// Package web wires the application's HTTP surface. Routes split into three
+// layers: every request goes through recover → log → authMiddleware (session
+// + viewer + CSRF + must_change_password gate). Authenticated-only routes
+// additionally pass through requireSession; the login/signup pages pass
+// through requireAnonymous.
 package web
 
 import (
@@ -35,18 +36,41 @@ func Handler(opts Options) http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
-	mux.Handle("GET /{$}", indexHandler())
-
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(static.FS()))))
+
+	mux.Handle("GET /{$}", indexHandler(logger))
 
 	// Auth routes available only when authMiddleware ran (svc != nil).
 	if opts.AuthService != nil {
 		anon := requireAnonymous()
-		mux.Handle("GET /signup", anon(getSignup()))
+		auth := requireSession()
+
+		// Public + anonymous-only.
+		mux.Handle("GET /signup", anon(getSignup(opts.AuthService, logger)))
 		mux.Handle("POST /signup", anon(postSignup(opts.AuthService, logger, opts.SecureCookies)))
-		mux.Handle("GET /login", anon(getLogin()))
+		mux.Handle("GET /login", anon(getLogin(opts.AuthService, logger)))
 		mux.Handle("POST /login", anon(postLogin(opts.AuthService, logger, opts.SecureCookies)))
 		mux.Handle("POST /logout", postLogout(opts.AuthService, logger, opts.SecureCookies))
+
+		// Invites: GET is public (the page adapts based on session); POST
+		// requires a session so the consume binds to a real user.
+		mux.Handle("GET /invites/{token}", getInvite(opts.AuthService, logger))
+		mux.Handle("POST /invites/{token}", postInvite(opts.AuthService, logger))
+
+		// Teams + projects + tokens — all require an authenticated session.
+		mux.Handle("GET /teams/{id}", auth(getTeam(logger)))
+		mux.Handle("POST /teams/{id}/invites", auth(postTeamInvites(logger)))
+		mux.Handle("POST /teams/{id}/projects", auth(postTeamProjects(logger)))
+
+		mux.Handle("GET /projects/{id}", auth(getProject(logger)))
+		mux.Handle("POST /projects/{id}/delete", auth(postProjectDelete(logger)))
+		mux.Handle("POST /projects/{id}/tokens", auth(postProjectTokens(logger)))
+		mux.Handle("POST /projects/{id}/tokens/{tid}/revoke", auth(postProjectTokenRevoke(logger)))
+
+		// Account / password change. The must_change_password gate inside
+		// authMiddleware redirects flagged users here from everywhere else.
+		mux.Handle("GET /account/password", auth(getAccountPassword()))
+		mux.Handle("POST /account/password", auth(postAccountPassword(opts.AuthService, logger)))
 	}
 
 	var chain http.Handler = mux
