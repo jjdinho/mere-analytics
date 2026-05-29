@@ -749,7 +749,8 @@ Shipped in PR #2. PG + CH connection pools (admin + readonly); idempotent `CREAT
 - **Response streaming** is required, not optional.
 - CH errors returned verbatim — `mere_readonly`'s grants already define the leak surface.
 - **Query handler MUST pass `r.Context()` to the CH driver** — verified in a unit test. Client disconnect → CH query KILLed.
-- **Tenant-isolation contract test.** `tenant_isolation_test.go` ships in this step. A route-registry pattern enrolls every `/v1/*` route. The test seeds two projects (A, B) with distinct events, calls every enrolled route with A's token, and asserts no B-distinguishable string appears. New routes either enroll or break the test. This is the single most-important test for the project.
+- **Single executor, two front doors.** `/v1/query` and the MCP query tool (step 9) MUST both call `internal/query.Executor` — same function, same pool, same `additional_table_filters` map, same per-request `WithSettings`. No SQL strings, CH driver calls, or settings construction live in `internal/web/handlers/query.go` or `internal/mcp/`; the handlers are thin adapters that translate transport (HTTP body ↔ MCP tool args) into an executor call. Same rule for typed reads: `internal/{events,sessions,persons,groups}` `Scoped` builders are the only path to the analytics tables. If a future "MCP shortcut" is tempting, the answer is to extend the executor, not duplicate it.
+- **Tenant-isolation contract test.** `tenant_isolation_test.go` ships in this step. A route-registry pattern enrolls every `/v1/*` route **and every MCP tool that reads analytics data** (query, events, sessions, persons, groups). The test seeds two projects (A, B) with distinct events, calls every enrolled entry point with A's token, and asserts no B-distinguishable string appears. New routes or tools either enroll or break the test. This is the single most-important test for the project.
 
 **Error/rescue:**
 - CH parse error → 400 with CH message verbatim.
@@ -780,10 +781,11 @@ Shipped in PR #2. PG + CH connection pools (admin + readonly); idempotent `CREAT
 
 **New code:**
 - `/internal/mcp/adapter.go` — `RegisterTool(name, handler)` helper wraps every tool handler with `defer/recover`, translates panics to JSON-RPC `internal_error`, logs at ERROR with stack trace. Mounted via the same mux as web routes so `recoverMiddleware` is a second line of defense.
-- `/internal/mcp/tools/` — tool definitions wrapping events, sessions, persons, groups, query.
+- `/internal/mcp/tools/` — tool definitions that **call the same `internal/query` executor and `internal/{events,sessions,persons,groups}` `Scoped` builders as the HTTP handlers**. Tool handlers are pure adapters: parse the MCP tool args, call the shared service, marshal the result into the MCP response. No SQL, no CH driver calls, no `additional_table_filters` map construction lives in this package — if it does, the isolation contract has two sources of truth and will drift.
 - `/internal/web/handlers/mcp.go` — mounts the MCP handler at `/mcp`; bearer auth identical to `/v1/*`.
 
 **Decisions for this step:**
+- **Single executor, two front doors** (see step 8). MCP tools and `/v1/*` handlers share `internal/query` and the typed `Scoped` builders. Anything tenant-sensitive (filters, per-request CH limits, pool selection) lives in those packages and only those packages.
 - **Double-recovery** on panics — library bug cannot escape.
 - `mark3labs/mcp-go` pinned to a specific **commit SHA** in `go.mod`, not a moving tag.
 - CORS on `/mcp` matches `/v1/*`.
@@ -796,6 +798,7 @@ Shipped in PR #2. PG + CH connection pools (admin + readonly); idempotent `CREAT
 - Inject a panic in a tool → JSON-RPC error, process survives, log line present.
 - Malformed JSON-RPC payload → proper JSON-RPC error.
 - Bearer auth applied to `/mcp`.
+- **MCP tools enrolled in the step-8 tenant-isolation contract test.** A/B-seeded run with A's token through every read/query tool returns no B-distinguishable row.
 
 **Done when:** A Claude MCP client can connect and run a read tool against a project.
 
