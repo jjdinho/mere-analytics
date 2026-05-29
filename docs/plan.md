@@ -91,7 +91,7 @@ One binary, two databases. No worker process in v1 — async work runs as gorout
 |---|---|---|
 | SQL access (Postgres) | `pgx` directly · `sqlc` · `sqlx` · `gorm` | **`sqlc`** — compile-time-checked SQL → typed Go. Best fit for the small, mostly-static schema. |
 | Migrations | `golang-migrate` · `goose` · `atlas` | **`golang-migrate`** — plain `.sql` files, runs both PG and CH dialects. |
-| Config | env vars + `envconfig` · `viper` · `koanf` | **`envconfig`** — small, struct-based, no surprises. |
+| Config | env vars + `caarlos0/env` · `viper` · `koanf` | **`caarlos0/env`** — small, struct-based, actively maintained. |
 | Logging | `log/slog` (stdlib) · `zerolog` · `zap` | **`log/slog`** — stdlib, structured, plenty for this scope. |
 | Sessions | signed cookies · PG-backed | **PG-backed `sessions` table** — easy to invalidate, observable. |
 | Password hashing | `golang.org/x/crypto/bcrypt` | Default. |
@@ -493,7 +493,7 @@ PG and CH data live in named host volumes under `/data/mere/` on the VPS. They s
 
 Multi-stage build:
 
-1. `golang:1.22-alpine` builder stage — runs `go mod download`, `templ generate`, `go build -ldflags='-s -w'` → produces a static `mere-server` binary.
+1. `golang:1.25-alpine` builder stage — runs `go mod download`, `templ generate`, `go build -ldflags='-s -w'` → produces a static `mere-server` binary.
 2. `alpine:3.19` (or `scratch` if cgo isn't needed) runtime stage — copies the binary, copies `/migrations/` so the entrypoint can find them.
 3. ENTRYPOINT: `/mere-server` — the binary itself reads env, runs migrations, starts serving. No separate entrypoint script.
 
@@ -544,20 +544,321 @@ Self-hosters on other providers, or those who want logical (not block-level) bac
 
 ## Build order
 
-Each step leaves a runnable, useful binary.
+Each step leaves a runnable, useful binary. The topic sections above ([Architecture](#architecture), [Data model](#data-model), [Public API](#public-api), [Ingest validation](#ingest-validation), [Web UI](#web-ui), [Auth](#auth), [Multi-tenant isolation](#multi-tenant-isolation), [Ingest reliability](#ingest-reliability), [Operator actions](#operator-actions), [Deploy](#deploy)) remain authoritative for cross-cutting design; each step below references them and adds step-specific decisions, error/rescue notes, and tests.
 
-1. **Skeleton.** `main.go`, config loading, structured logging, healthcheck endpoint, embedded templ "hello" page, Dockerfile. Goal: `docker run` serves a page.
-2. **Databases.** Postgres + ClickHouse connections, migrations runner, basic schema (`users`, `teams`, `team_memberships`, `projects`, `api_tokens`, `sessions`, `events_raw_v1`). Provision `mere_readonly` CH user if missing. Goal: tables exist on fresh boot.
-3. **Auth.** Open signup (creates user + personal team), login, logout. `pgcrypto` extension + `scripts/operator/reset-password.sql` + the `reset-password` Kamal alias. Goal: log into the web UI; operator can reset a locked-out user.
-4. **Teams + projects + tokens.** CRUD pages, soft-delete on projects. Goal: create a team, create a project, issue a token, revoke a token.
-5. **Ingest.** `POST /v1/ingest`, validation, in-memory buffer, ClickHouse writer, Postgres DLQ on failure. Goal: curl events in, see them in `events_raw_v1`.
-6. **Events MV + read endpoints.** `events_v2` materialized view, `GET /v1/events`, event explorer page. Goal: ingested events show up in the UI.
-7. **Sessions + persons + groups.** MVs and read endpoints. Goal: parity with the "keep list" from the rebrand docs.
-8. **Query API.** `POST /v1/query`, executor that attaches `additional_table_filters` to every read query, playground UI. Includes the isolation sanity-check tests listed under "Multi-tenant isolation." Goal: run SQL from the web UI, get JSON from the API; cross-project scope violations are impossible.
-9. **MCP.** `/mcp` endpoint via `mark3labs/mcp-go`, tool definitions wrapping the read + query endpoints. Goal: a Claude MCP client can connect and query.
-10. **Deploy: end-to-end VPS provisioning.** `Dockerfile`, `config/deploy.example.yml`, `config/deploy/postgres/init.sql`, `config/deploy/clickhouse/users.xml` + `config.xml`. Embed migrations in the binary; entrypoint auto-runs them. Test on a fresh Hetzner VPS: `kamal setup` from zero → working deployment with TLS → ingest events → query them. `kamal deploy` an upgrade with zero downtime. Goal: a stranger can `kamal setup` and have a working analytics server in under 10 minutes.
-11. **CI image publishing.** GitHub Action on tagged release: build amd64 (only — arm64 deferred), push to GHCR public. Goal: `ghcr.io/<org>/mere:vX.Y.Z` exists after `git tag v0.1.0 && git push --tags`.
-12. **Docs + self-host guide.** `docs/api.md`, `docs/self-host.md` (the "from zero" workflow above, expanded), README. Goal: someone else can stand it up from scratch without help.
+### Step 1 — Skeleton [DONE]
+
+Shipped in PR #2. `main.go` boots; config loaded; slog initialized; `/healthz` returns "ok"; templ "hello" page at `/`; multi-stage Dockerfile; embedded migrations FS; e2e boot test.
+
+### Step 2 — Databases [DONE]
+
+Shipped in PR #2. PG + CH connection pools (admin + readonly); idempotent `CREATE DATABASE` / `CREATE USER` / `GRANT` for readonly; golang-migrate runner with dirty-state operator runbook; initial PG schema (`users`, `teams`, `team_memberships`, `projects`, `api_tokens`, `sessions`) and CH schema (`events_raw_v1`).
+
+### Step 3 — Auth
+
+**Goal:** A user can sign up, log in, log out via the web UI. An operator can reset a locked-out user's password via `kamal reset-password`.
+
+**Implement per:** [Auth](#auth) section.
+
+**Schema additions:**
+- New PG migration: add `csrf_token TEXT NOT NULL` to `sessions`.
+
+**New code:**
+- `/internal/auth/` — password hashing (bcrypt cost=10), session create/lookup/destroy, CSRF token generation.
+- `/internal/web/` handlers: `/signup`, `/login`, `/logout`.
+- `/internal/web/middleware.go`: session-cookie middleware, CSRF middleware.
+- `/internal/views/`: `signup.templ`, `login.templ`, `layout.templ` with `@csrfField()` helper + `hx-headers` script.
+- `/scripts/operator/reset-password.sql` — `UPDATE` wrapped in `DO` block that `RAISE EXCEPTION` on `NOT FOUND`.
+
+**Decisions for this step:**
+- Session cookie: `mere_session`, HttpOnly, SameSite=Lax, PG-backed. Sliding expiry on each authenticated request; hard cap 30 days.
+- CSRF: per-session token in `sessions.csrf_token`; templ `@csrfField()` helper for forms; htmx layout sets `hx-headers='{"X-CSRF-Token":"..."}'` globally; middleware verifies on non-GET requests to web routes; `/v1/*` and `/mcp` exempt (Bearer auth, no cookie).
+- Open signup; bot-flood mitigation is the deployer's responsibility (front with Cloudflare Access / basic auth / VPN). Plan Non-goals + decisions log #4.
+- Bcrypt cost = 10 (Go default).
+- `reset-password.sql` raises on unknown email so kamal alias exits non-zero (don't silently report success on a typo'd email).
+- Adopt `sqlc` here, before any hand-written PG queries: set up `sqlc.yaml`, generate into `internal/postgres/db/`, use generated queries from step 3 onward.
+
+**Error/rescue:**
+- Duplicate email on signup → re-render form with "email already registered".
+- Invalid credentials on login → re-render with "invalid credentials" (do not distinguish user-not-found vs wrong-password).
+- Session lookup ctx timeout (200ms) → treat as unauthenticated, redirect to `/login`.
+- CSRF mismatch on non-GET → 403.
+
+**Tests:**
+- Unit: bcrypt round-trip; CSRF token gen; session expiry math.
+- Integration: signup creates user+team+membership in one transaction; login sets cookie; logout deletes session; CSRF rejection (no token, wrong token, expired session); regression test that templ escapes `<script>` in usernames.
+- Operator: `reset-password.sql` exits non-zero on unknown email.
+
+**Done when:** A user can sign up, log in, see a logged-in page, log out. `reset-password` kamal alias works against the local docker-compose stack.
+
+### Step 4 — Teams + projects + tokens
+
+**Goal:** A logged-in user can create teams, invite members, create projects, issue / revoke API tokens.
+
+**Implement per:** [Auth](#auth) (token format) + [Web UI](#web-ui).
+
+**Schema additions:**
+- New PG migration: `team_invites` (`id, token_hash, team_id, created_by, expires_at, consumed_at`); token stored as sha256 hash like `api_tokens`.
+
+**New code:**
+- `/internal/projects/` — project CRUD with soft-delete.
+- `/internal/auth/tokens.go` — generation, hashing, lookup.
+- `/internal/auth/viewer.go` — `viewer.Projects(ctx).ByID(id)` / `viewer.Teams(ctx).ByID(id)` helpers; carry `user_id` from session middleware; JOIN `team_memberships`; missing membership → `sql.ErrNoRows`.
+- `/internal/web/` handlers: `/teams/:id`, `/teams/:id/projects`, `/projects/:id`, `/projects/:id/tokens`, `/invites/:token`.
+- `/internal/views/`: team, projects, project-detail, token-create (visible-once UX), invite-consume.
+
+**Decisions for this step:**
+- Bearer token format: `mere_pat_<43-char base64url of 32 random bytes>`. Stored as sha256 hex in `api_tokens.token_hash`. Visible **exactly once** at creation in the web UI: warning banner + copy-to-clipboard button + "I've saved the token" explicit dismissal. Prefix enables leak scanners (TruffleHog, GitHub secret scanning).
+- All web UI data access goes through `viewer.X(ctx).ByID(id)`; missing membership = **404** not 403 (avoid confirming existence; protects against UUID enumeration).
+- Team invite consume: atomic `UPDATE team_invites SET consumed_at = NOW() WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > NOW() RETURNING ...`; check `RowsAffected == 1`. 7-day TTL.
+- Project soft-delete sets `deleted_at`; CH data persists. No UI restore (operator-recoverable via `UPDATE projects SET deleted_at = NULL`).
+- Bearer auth lookup against soft-deleted project: 404 on `/v1/*` (plan line 209); token itself isn't revoked, just inaccessible.
+
+**Error/rescue:**
+- Token "Create" double-click → `hx-disable-elt='this'` on every htmx button (templ helper).
+- Direct object reference for someone else's project → viewer returns no rows → 404.
+- Invite already-consumed / expired → 404 (don't distinguish).
+
+**Tests:**
+- Unit: token format/length, sha256 round-trip, invite expiry math.
+- Integration: token-create flow returns plaintext exactly once; subsequent loads never expose plaintext; project soft-delete makes `/v1/*` return 404; invite consume-once race (two concurrent `UPDATE` → only one wins).
+- Security: cross-user authorization on every `/teams/:id` and `/projects/:id` route — user A cannot view user B's data.
+
+**Done when:** Create a team via UI, invite a second user, create a project, issue a token (visible once), revoke it, soft-delete the project.
+
+### Step 5 — Ingest
+
+**Goal:** `curl POST /v1/ingest` lands events in `events_raw_v1`. Survives transient CH outages via DLQ; surfaces both-down state loudly.
+
+**Implement per:** [Ingest validation](#ingest-validation) + [Ingest reliability](#ingest-reliability).
+
+**Schema additions:**
+- New PG migration: `failed_events` — `(id, batch_payload JSONB, last_error TEXT, attempt_count INT NOT NULL DEFAULT 0, created_at, last_attempt_at, quarantined_at TIMESTAMPTZ)`. Per-batch row.
+
+**New code:**
+- `/internal/ingest/`:
+  - `validator.go` — per-event validation (`event` + `timestamp` required; `properties` + `extras` lenient).
+  - `channel.go` — buffered channel; size from env `INGEST_CHANNEL_SIZE` (default 50000).
+  - `flusher.go` — goroutine; flushes on N events (env `INGEST_FLUSH_EVENTS` default 5000) or T seconds (env `INGEST_FLUSH_INTERVAL` default 2s). On CH fail → writes to `failed_events`. On PG-also-fail → sets fatal-state flag.
+  - `dlq.go` — drain goroutine; per-row backoff + `attempt_count` increment; quarantine after 20 attempts OR 24h age.
+  - `state.go` — `atomic.Bool` fatal-state flag, `atomic.Bool` ingest-disabled flag.
+- `/internal/web/middleware.go`: `MaxBody(bytes int64)` factory; CORS middleware.
+- `/internal/web/handlers/ingest.go` — bearer auth, check fatal-state + ingest-disabled flags, body limit 10MB.
+
+**Decisions for this step:**
+- **Cascade fatal-state flag.** When CH write AND `failed_events` insert both fail in the same flush, set a process-level flag. While set: `/v1/ingest` returns 503 + `Retry-After:30`; channel stops accepting new events; `/healthz` also returns 503. Flusher loops with backoff; first successful CH or PG write clears the flag. Honors "never silently drop" — producer keeps retrying, no 202 it doesn't deserve.
+- **Poison-pill quarantine.** DLQ rows quarantine after 20 retry attempts OR 24h age. Drain skips quarantined rows. WARN log with row IDs on quarantine; recovery is a manual SQL UPDATE.
+- **DLQ depth observability.** Drain loop logs depth (INFO baseline, WARN >100, ERROR >10k). `/healthz` returns 503 when depth exceeds env-configured ceiling (default `DLQ_DEPTH_503_THRESHOLD=100000`).
+- **`INGEST_DISABLED` kill switch.** When env set, `/v1/ingest` returns 503 + `Retry-After:300`; `/v1/query` and web UI continue. Boot log + periodic WARN every 5 min while disabled; `/healthz` JSON body reports the flag. Operator workflow: `kamal env set INGEST_DISABLED=1 && kamal app restart`.
+- **Per-route `MaxBody`.** `/v1/ingest` = 10MB, `/v1/query` = 256KB, web form POSTs = 64KB. 413 on exceed.
+- **CORS** on `/v1/*` and `/mcp`: `Access-Control-Allow-Origin: *` default; `Allow-Methods: GET,POST,OPTIONS`; `Allow-Headers: Authorization,Content-Type`. Optional env `ALLOWED_ORIGINS=https://app.example.com,...` to restrict. Web UI routes set no CORS headers (same-origin enforced by browser).
+- **SIGTERM choreography.** (1) Close `/v1/ingest` (returns 503 for new requests); (2) HTTP server begins shutdown; (3) flusher gets up to env `INGEST_SHUTDOWN_GRACE_SEC` (default 10s) to drain channel to CH; (4) residual events written to `failed_events` as one batch; (5) exit. Coordinates with kamal-proxy `drain_timeout=30s` (set in step 10's `deploy.yml`).
+- **Concurrency primitives.** `sync.Once` for flusher startup; `chan struct{}` for shutdown signaling; `atomic.Bool` for fatal-state and ingest-disabled flags. Avoid mutexes on the hot path.
+- **Connection pool sizing.** pgx default is `max_conns = max(4, runtime.NumCPU()*4)`; clickhouse-go defaults to 10. Tune both during this step against realistic ingest concurrency.
+- **Edge cases:** Empty batch `{"events": []}` → 200 `{accepted: 0}`, not 400. DB error in bearer/project lookup → 503 generic (don't leak DB status).
+
+**Error/rescue:** See Section 2 error registry (E5–E11, E18, E19) in `/Users/jakejohnson/conductor/workspaces/mere-analytics/lansing-v2/TODOS.md` decision history.
+
+**Tests:**
+- Unit: validator (required fields, optional fields, extras stored verbatim, per-event errors in a batch).
+- Integration: ingest a batch → rows in `events_raw_v1`; bad project token → 401; soft-deleted project → 404; empty batch → 200; oversized body → 413.
+- Chaos: stop CH mid-test → batch lands in `failed_events`; restart CH → DLQ drain succeeds; stop both CH + PG → fatal-state flag → `/v1/ingest` 503 + `/healthz` 503; restart CH → flag clears; inject a row that always fails CH insert → quarantined after 20 attempts.
+- Saturation: fill channel to `N+1` → 503 + `Retry-After`.
+- SIGTERM: send 1000 events, SIGTERM immediately → zero data loss (some in CH, rest in `failed_events`).
+- `INGEST_DISABLED`: set env → `/v1/ingest` 503; `/v1/query` unaffected.
+
+**Done when:** `curl` ingests events; events appear in `events_raw_v1`; CH outage survives via DLQ; both-down state surfaces via 503 + log; SIGTERM doesn't lose data.
+
+### Step 6 — Events MV + read endpoints
+
+**Goal:** `events_v2` MV is populated from `events_raw_v1`; `GET /v1/events` and the web event explorer return data scoped to the bearer-authed project.
+
+**Implement per:** [Data model](#data-model) + [Multi-tenant isolation](#multi-tenant-isolation).
+
+**Schema additions:**
+- New CH migration: `events_v2` table + materialized view from `events_raw_v1`.
+  - Columns: `(project_id UUID, event LowCardinality(String), distinct_id Nullable(String), timestamp DateTime64(3,'UTC'), session_id Nullable(String), properties String, extras String)` — same as `events_raw_v1` minus `received_at`.
+  - `properties` and `extras` stay as raw JSON `String`: lossless; user calls `JSONExtract*` in `/v1/query`.
+  - `ORDER BY (project_id, event, timestamp)` — read-optimized for "find all events of type X". Revisit with realistic data.
+  - `PARTITION BY toYYYYMM(timestamp)`.
+
+**New code:**
+- `/internal/events/scoped.go` — `events.Scoped(ctx, projectID)` builder exposing `.List(filter)`, `.ByID(id)`, `.Count(...)`, etc. Every method generates SQL with `WHERE project_id = $projectID` built in. Constructor attaches `clickhouse.WithSettings({max_execution_time=30, max_memory_usage=4GiB, max_result_rows=1000000})` so tenant filter and query budget ride together — no callsite can have one without the other.
+- `/internal/web/handlers/events.go` — `GET /v1/events`, `GET /v1/events/:id` (bearer-authed, calls `Scoped`); web UI event explorer page.
+
+**Decisions for this step:**
+- **`events_v2` schema as above** — raw `String` for `properties`/`extras` (lossless; conflicts with naïve "queryable" framing but user has `JSONExtract*` in `/v1/query`). MV's only job is read-optimized ORDER BY.
+- **`Scoped` builder pattern** is the compile-time-ish guarantee against cross-tenant leak. No method in the package exposes a query without the `project_id` predicate. Mirror this pattern in step 7 for sessions/persons/groups.
+- **Per-request CH limits via `WithSettings`** attached by `Scoped` constructor. Implementer cannot forget — there is no other way to obtain a query.
+- **Pagination:** cursor = `base64(timestamp + id)`; bad cursor → 400 `invalid_cursor`.
+- **Verify golang-migrate CH multi-statement.** The driver is already configured with `MultiStatementEnabled: true` (`internal/clickhouse/clickhouse.go:63`), but smoke-test with `CREATE TABLE` + `CREATE MATERIALIZED VIEW` in one migration file before relying on it. If it fails, split into two files.
+
+**Error/rescue:**
+- Bad cursor → 400.
+- Forgotten WHERE — structurally prevented by `Scoped`.
+- Query timeout / OOM — surfaced as 400 with CH error verbatim.
+
+**Tests:**
+- MV idempotency: boot twice, no errors, MV state identical.
+- `Scoped` enforcement: project A's `Scoped().List()` never returns project B's rows; constructor with empty `projectID` → runtime error.
+- Pagination round-trip.
+- Integration: ingest 1000 events into project A, 1000 into B; list with A's token returns exactly 1000.
+
+**Done when:** Ingest events; see them via `/v1/events` and in the explorer UI.
+
+### Step 7 — Sessions + persons + groups
+
+**Goal:** `sessions_v1`, `persons_v1`, `groups_v1` exist and back read endpoints.
+
+**Implement per:** [Data model](#data-model).
+
+**Schema additions:**
+- New CH migrations: `sessions_v1` (MV from `events_v2`, 30-min inactivity model), `persons_v1` (MV from `events_v2` keyed on `distinct_id`), `groups_v1` (MergeTree; direct writes from a forthcoming `POST /v1/groups` endpoint).
+- All carry `project_id` as PK prefix.
+
+**New code:**
+- `/internal/sessions/scoped.go`, `/internal/persons/scoped.go`, `/internal/groups/scoped.go` — `Scoped` builder per resource, mirroring step 6.
+- `/internal/web/handlers/` — `GET /v1/sessions`, `GET /v1/sessions/:id`, `GET /v1/persons`, `GET /v1/persons/:distinct_id`, `GET /v1/groups`.
+
+**Decisions for this step:**
+- Same `Scoped` pattern + same per-request CH limits as step 6.
+- Groups: `POST /v1/groups` for direct upserts (no MV); request shape decided during implementation.
+
+**Tests:**
+- MV idempotency per table.
+- `Scoped` enforcement per resource.
+- Session boundary: 30-min inactivity correctly splits one user's events into two sessions.
+
+**Done when:** Ingest events; see derived sessions/persons/groups data via API.
+
+### Step 8 — Query API
+
+**Goal:** `POST /v1/query` runs arbitrary SQL as `mere_readonly`; tenant isolation enforced via `additional_table_filters`; web playground works.
+
+**Implement per:** [Multi-tenant isolation](#multi-tenant-isolation).
+
+**Schema additions:** None.
+
+**New code:**
+- `/internal/query/executor.go` — accepts `{sql}`; attaches `additional_table_filters` for all analytics tables; attaches per-request CH settings (`max_execution_time=30s`, `max_memory_usage=4GiB`, `max_result_rows=1000000`); runs against `mere_readonly` pool; **streams** `{columns, rows, stats}` response (write JSON envelope incrementally; emit rows directly to `http.ResponseWriter` instead of buffering a `[]map` — a 1M-row buffered response is ~100MB in memory).
+- `/internal/web/handlers/query.go` — `POST /v1/query`; web UI playground page (textarea + Run button + results table).
+
+**Decisions for this step:**
+- `additional_table_filters` is the isolation mechanism for `/v1/query` and the MCP query tool only — typed reads (steps 6-7) use `Scoped` builders instead. User SQL passes through unmodified; CH merges the filter at execution.
+- **Per-request limits via `WithSettings`** (same values as `Scoped`).
+- **Response streaming** is required, not optional.
+- CH errors returned verbatim — `mere_readonly`'s grants already define the leak surface.
+- **Query handler MUST pass `r.Context()` to the CH driver** — verified in a unit test. Client disconnect → CH query KILLed.
+- **Tenant-isolation contract test.** `tenant_isolation_test.go` ships in this step. A route-registry pattern enrolls every `/v1/*` route. The test seeds two projects (A, B) with distinct events, calls every enrolled route with A's token, and asserts no B-distinguishable string appears. New routes either enroll or break the test. This is the single most-important test for the project.
+
+**Error/rescue:**
+- CH parse error → 400 with CH message verbatim.
+- Timeout (`max_execution_time`) → 400 with timeout message.
+- OOM (`max_memory_usage`) → 400 with memory message.
+- Client disconnect → query cancellation propagates to CH.
+
+**Tests:**
+- **Isolation sanity checks** (plan lines 282–288):
+  - `SELECT count() FROM analytics.events_v2` returns only one project's rows.
+  - Cross-table join `SELECT * FROM events_v2 e JOIN persons_v1 p ON e.distinct_id = p.distinct_id` — both filtered.
+  - Subquery / alias `SELECT * FROM (SELECT * FROM events_v2)` — still filtered.
+  - User attempts to override `SETTINGS additional_table_filters = {...}` — our filter still wins.
+  - `system.*` tables unreachable to `mere_readonly`.
+- **Limits:** 31s query → 400 timeout; 5GiB query → 400 memory.
+- **Cancellation:** client disconnect mid-query → CH `KILL QUERY`.
+- **Contract test** as described above.
+
+**Done when:** `/v1/query` runs SQL with tenant isolation; playground UI works; contract test green.
+
+### Step 9 — MCP
+
+**Goal:** `/mcp` endpoint via `mark3labs/mcp-go`; tools wrap the read + query endpoints.
+
+**Implement per:** [Public API](#public-api).
+
+**Schema additions:** None.
+
+**New code:**
+- `/internal/mcp/adapter.go` — `RegisterTool(name, handler)` helper wraps every tool handler with `defer/recover`, translates panics to JSON-RPC `internal_error`, logs at ERROR with stack trace. Mounted via the same mux as web routes so `recoverMiddleware` is a second line of defense.
+- `/internal/mcp/tools/` — tool definitions wrapping events, sessions, persons, groups, query.
+- `/internal/web/handlers/mcp.go` — mounts the MCP handler at `/mcp`; bearer auth identical to `/v1/*`.
+
+**Decisions for this step:**
+- **Double-recovery** on panics — library bug cannot escape.
+- `mark3labs/mcp-go` pinned to a specific **commit SHA** in `go.mod`, not a moving tag.
+- CORS on `/mcp` matches `/v1/*`.
+
+**Error/rescue:**
+- Panic in tool handler → JSON-RPC `internal_error` + ERROR log; not a process crash.
+- Malformed JSON-RPC → well-formed JSON-RPC error response.
+
+**Tests:**
+- Inject a panic in a tool → JSON-RPC error, process survives, log line present.
+- Malformed JSON-RPC payload → proper JSON-RPC error.
+- Bearer auth applied to `/mcp`.
+
+**Done when:** A Claude MCP client can connect and run a read tool against a project.
+
+### Step 10 — Deploy: end-to-end VPS provisioning
+
+**Goal:** A stranger can `kamal setup` on a fresh Hetzner VPS and have a working analytics server in under 10 minutes.
+
+**Implement per:** [Deploy](#deploy).
+
+**Files:**
+- `config/deploy.example.yml`, `config/deploy.yml`.
+- `config/deploy/postgres/init.sql`.
+- `config/deploy/clickhouse/users.xml`, `config/deploy/clickhouse/config.xml`.
+- `scripts/operator/reset-password.sql`, `scripts/operator/wipe-project.sql` (or inline in alias).
+- `Dockerfile` already exists; refine for production.
+
+**Decisions for this step:**
+- **Resolve `mere_readonly` source-of-truth.** Today (steps 1-2 era) the app provisions readonly on every boot (`internal/clickhouse/bootstrap.go:ProvisionReadonlyUser`). When this step ships `users.xml`, choose between:
+  - **(A)** `users.xml` defines admin only; app remains the sole source of truth for readonly. **Default recommendation.** Reason: avoids two sources of truth (sneaky failure mode); keeps drift correction; keeps rotation convergence.
+  - (B) `users.xml` defines both; app keeps provisioning as belt-and-suspenders. Risk: divergence in botched rotation.
+  - (C) `users.xml` defines both; remove app-side provisioning. Cleanest separation but gives up drift correction.
+- **Broken-migration recovery docs.** Add a "Recovering from a broken migration" section to `docs/self-host.md` (written in step 12) with explicit `kamal db-console` / `kamal clickhouse-console` recipes for: (1) `migrate force N`, (2) drop / recreate a broken MV, (3) writing the fix-forward migration. Convention is fix-forward, not rollback.
+- **Build-time version stamp.** Inject `git describe --tags` via ld-flag (`-X main.Version=...`) in the Dockerfile; `main.go` logs `version=...` on boot; `/healthz` JSON body returns it. Answers "what's deployed right now?" from `kamal logs`.
+- **kamal-proxy `drain_timeout=30s`** in `deploy.yml` (must exceed app's `INGEST_SHUTDOWN_GRACE_SEC` from step 5).
+- **Operator alias surface:** `reset-password`, `wipe-project`, `db-console`, `clickhouse-console`, plus kamal-default `console` and `logs`. No additional aliases in v1.
+
+**Tests:**
+- Manual on a fresh Hetzner VPS: `kamal setup` from zero → TLS → `POST /v1/ingest` → `GET /v1/events` → `kamal deploy` an upgrade with zero downtime → verify ingest + query unaffected during the swap.
+- Migration auto-run on container restart: deploy with a no-op new migration; observe it applied on boot.
+
+**Done when:** A fresh VPS reaches working state via `kamal setup` in under 10 min.
+
+### Step 11 — CI image publishing
+
+**Goal:** `ghcr.io/<org>/mere:vX.Y.Z` exists shortly after `git tag v0.1.0 && git push --tags`.
+
+**Files:**
+- `.github/workflows/release.yml` — builds amd64 image, pushes to GHCR public on tag push.
+
+**Decisions for this step:**
+- **amd64-only in v1.** arm64 deferred until requested. Saves CI matrix + build time.
+- **Public images on GHCR**; no auth required for pull.
+
+**Tests:**
+- Tag a pre-release (`v0.0.1-pre.1`); verify the image lands at the expected GHCR path; verify `docker pull` works without auth.
+
+**Done when:** A tagged release produces a public image within a few minutes.
+
+### Step 12 — Docs + self-host guide
+
+**Goal:** Someone else can stand it up from scratch without help.
+
+**Files:**
+- `docs/api.md` — public API reference (every `/v1/*` endpoint, MCP tools, error shapes).
+- `docs/self-host.md` — the "from zero" workflow above, expanded; includes the broken-migration recovery recipes (from step 10's decision); includes the backward-compatible-migration convention (see TODOS.md); includes example `pg_dump` + `clickhouse-backup` scripts for non-Hetzner deployers.
+- `README.md` — pitch, quickstart, link to `self-host.md`.
+- `docs/architecture.md` — written once the design has stabilized through implementation.
+
+**Decisions for this step:**
+- Document the **backward-compatible migration convention** prominently: add-column is OK; drop-column requires expand-contract across two deploys; rename = same. Reference from every migration file's header comment.
+- **Backups:** Hetzner automated disk-level snapshots by default; example `pg_dump` + `clickhouse-backup` scripts for other providers; no built-in accessory in v1.
+
+**Done when:** A stranger reads the docs and gets a working deploy without asking questions.
 
 ## Decisions log (resolved open questions)
 
