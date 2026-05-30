@@ -80,7 +80,7 @@ func authMiddleware(svc *auth.Service, logger *slog.Logger, secureCookies bool) 
 			ctx = auth.WithSession(ctx, session)
 			ctx = auth.WithCSRFToken(ctx, csrfToken)
 			if session != nil {
-				ctx = auth.WithViewer(ctx, auth.NewViewer(svc.Queries(), session.UserID))
+				ctx = auth.WithViewer(ctx, auth.NewViewer(svc, session.UserID))
 
 				// must_change_password gate (Issue 4). Allow the password-change
 				// page (so the user can resolve the flag), /logout (escape

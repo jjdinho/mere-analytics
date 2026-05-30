@@ -9,12 +9,14 @@ import (
 )
 
 type ApiToken struct {
-	ID        string
-	ProjectID string
-	Name      string
-	TokenHash string
-	CreatedAt pgtype.Timestamptz
-	RevokedAt pgtype.Timestamptz
+	ID             string
+	ProjectID      string
+	Name           string
+	TokenHash      string
+	CreatedAt      pgtype.Timestamptz
+	RevokedAt      pgtype.Timestamptz
+	Kind           string
+	TokenPlaintext *string
 }
 
 type Project struct {

@@ -60,6 +60,7 @@ func TestOpen_AndRunMigrations_Idempotent(t *testing.T) {
 		"users_email_lower_idx",
 		"api_tokens_token_hash_active_idx",
 		"api_tokens_project_id_idx",
+		"api_tokens_one_active_public_per_project_idx",
 		"projects_team_id_idx",
 		"sessions_user_id_idx",
 		"team_memberships_user_id_idx",

@@ -9,49 +9,90 @@ import (
 	"strings"
 )
 
-// Token lifecycle (Step 4):
+// Token lifecycle (Step 4 + public/secret split):
 //
 //                 ┌───────────────────────────┐
-//   GenerateToken │ plaintext ← "mere_pat_"   │  ──┐ shown to user once
-//                 │             + 43 chars    │    │ via render-on-POST
-//                 │ hash      ← sha256 hex    │    │ (Issue 3)
+//   GenerateToken │ plaintext ← prefix(kind)  │  ──┐ shown to user
+//   (kind)        │             + 43 chars    │    │ (once for secret,
+//                 │ hash      ← sha256 hex    │    │  always for public)
 //                 └────────────┬──────────────┘    │
 //                              │                   ▼
 //                              │            api_tokens row
-//                              │            (token_hash only)
+//                              │            kind=public_ingest|secret_api
+//                              │            (token_plaintext set only when
+//                              │             kind=public_ingest)
 //                              │
 //                       HashToken(submitted bearer)
 //                              │
 //                              ▼
-//                       Step 5 bearer middleware
-//                       looks up by hash; project_id
-//                       attaches to ctx for /v1/* + /mcp.
-//
-// The plaintext exists only in the response that creates it; it is never
-// echoed by ListTokensForProject, never logged, never stored.
+//                       Future bearer middleware
+//                       looks up by hash; project_id + kind
+//                       attach to ctx for /v1/* + /mcp.
 
-// TokenPrefix is the literal leading string of every plaintext API token.
-// The prefix lets leak scanners (TruffleHog, GitHub secret scanning) flag
-// accidentally committed tokens.
-const TokenPrefix = "mere_pat_"
+// TokenKind discriminates the two bearer flavours we issue.
+//
+//   - TokenKindPublic: lives in the snippet on a customer's website, hence
+//     non-secret. Auto-provisioned at project create, displayed verbatim on
+//     the project page. Authorized only for ingest in the future bearer
+//     middleware.
+//   - TokenKindSecret: user-issued from the project page for /v1/* + MCP.
+//     Plaintext shown exactly once at issuance (render-on-POST).
+type TokenKind string
+
+const (
+	TokenKindPublic TokenKind = "public_ingest"
+	TokenKindSecret TokenKind = "secret_api"
+)
+
+// PublicTokenPrefix tags the snippet/ingest token (mere_pub_…). Public by
+// design — its presence in client HTML is the entire point — so the prefix
+// being scanner-visible is fine.
+const PublicTokenPrefix = "mere_pub_"
+
+// SecretTokenPrefix tags read/MCP bearers (mere_pat_…). The prefix lets leak
+// scanners (TruffleHog, GitHub secret scanning) flag accidentally committed
+// secrets.
+const SecretTokenPrefix = "mere_pat_"
+
+// TokenPrefix is retained as an alias of SecretTokenPrefix so external callers
+// that imported the original constant keep compiling. New code should pick
+// the explicit Public/Secret variant.
+const TokenPrefix = SecretTokenPrefix
 
 // tokenRandomBytes is the number of CSPRNG bytes per token before base64url
 // encoding. 32 bytes → 43 RawURLEncoding chars → ~2^256 guess space.
 const tokenRandomBytes = 32
 
-// TokenPlaintextLength is the exact length of a valid plaintext token:
-// 9 (prefix) + 43 (RawURLEncoding of 32 random bytes) = 52.
-const TokenPlaintextLength = len(TokenPrefix) + 43
+// TokenPlaintextLength is the exact length of a valid plaintext token of
+// either kind: 9 (prefix) + 43 (RawURLEncoding of 32 random bytes) = 52.
+// Both prefixes are the same length by construction.
+const TokenPlaintextLength = len(SecretTokenPrefix) + 43
 
-// GenerateToken returns the plaintext token and its sha256 hex hash. The
-// caller writes hash to api_tokens.token_hash and surfaces plaintext to the
-// user exactly once.
-func GenerateToken() (plaintext, hashHex string, err error) {
+// prefixFor returns the plaintext prefix for kind. Unknown kinds yield "" so
+// the caller's downstream LooksLike check rejects them.
+func prefixFor(kind TokenKind) string {
+	switch kind {
+	case TokenKindPublic:
+		return PublicTokenPrefix
+	case TokenKindSecret:
+		return SecretTokenPrefix
+	}
+	return ""
+}
+
+// GenerateToken returns the plaintext token and its sha256 hex hash for the
+// requested kind. The caller writes hash to api_tokens.token_hash; for public
+// tokens it also persists plaintext so the project page can re-display it.
+func GenerateToken(kind TokenKind) (plaintext, hashHex string, err error) {
+	prefix := prefixFor(kind)
+	if prefix == "" {
+		return "", "", fmt.Errorf("token: unknown kind %q", kind)
+	}
 	var b [tokenRandomBytes]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", "", fmt.Errorf("token: read random: %w", err)
 	}
-	plaintext = TokenPrefix + base64.RawURLEncoding.EncodeToString(b[:])
+	plaintext = prefix + base64.RawURLEncoding.EncodeToString(b[:])
 	return plaintext, HashToken(plaintext), nil
 }
 
@@ -62,9 +103,25 @@ func HashToken(plaintext string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// LooksLikeAPIToken is a cheap structural check used by future bearer
-// middleware to reject obviously-bogus inputs before a DB round-trip. Only
-// checks the prefix + length; full validity requires the hash to match a row.
+// LooksLikeAPIToken reports whether s is structurally a token of either kind.
+// Cheap pre-filter for the future bearer middleware; full validity still
+// requires the hash to match a row.
 func LooksLikeAPIToken(s string) bool {
-	return len(s) == TokenPlaintextLength && strings.HasPrefix(s, TokenPrefix)
+	if len(s) != TokenPlaintextLength {
+		return false
+	}
+	return strings.HasPrefix(s, PublicTokenPrefix) || strings.HasPrefix(s, SecretTokenPrefix)
+}
+
+// TokenKindOf returns the kind implied by s's prefix, or "" if the prefix
+// matches neither. Length is not checked here; pair with LooksLikeAPIToken
+// when full structural validity matters.
+func TokenKindOf(s string) TokenKind {
+	switch {
+	case strings.HasPrefix(s, PublicTokenPrefix):
+		return TokenKindPublic
+	case strings.HasPrefix(s, SecretTokenPrefix):
+		return TokenKindSecret
+	}
+	return ""
 }

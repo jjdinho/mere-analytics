@@ -5,20 +5,32 @@ import (
 	"github.com/jjdinho/mere-analytics/internal/postgres/db"
 )
 
-// ProjectShowData carries the project detail view. NewToken is non-empty
-// only on the render-on-POST response after creating a token (Issue 3 —
-// plaintext shown exactly once).
+// ProjectShowData carries the project detail view.
+//
+//   - PublicToken is the plaintext mere_pub_… snippet token; non-secret,
+//     displayed verbatim on every visit so the user can copy it into
+//     client-side HTML. Auto-provisioned at project create.
+//   - NewToken is non-empty only on the render-on-POST response after
+//     issuing a secret_api token (Issue 3 — plaintext shown exactly once).
+//   - Tokens contains only active secret_api rows; the public token is
+//     surfaced separately via PublicToken.
 type ProjectShowData struct {
-	Project  db.Project
-	Tokens   []db.ApiToken
-	NewToken string // plaintext "mere_pat_..."; blank in steady state
-	ErrMsg   string
+	Project     db.Project
+	PublicToken string
+	Tokens      []db.ApiToken
+	NewToken    string // plaintext "mere_pat_..."; blank in steady state
+	ErrMsg      string
 }
 
 templ ProjectShow(session *auth.Session, data ProjectShowData) {
 	@Layout(data.Project.Name, session) {
 		<h1>{ data.Project.Name }</h1>
 		@FormError(data.ErrMsg)
+
+		<h2>Public ingest token</h2>
+		<p class="muted">Paste this into the snippet on your site. It's public by design — anything that can see your page can see it.</p>
+		<input type="text" value={ data.PublicToken } readonly onclick="this.select()" class="copybox" data-test="public-token"/>
+
 		if data.NewToken != "" {
 			<div class="notice" role="status">
 				<p><strong>API token issued.</strong> Copy it now — it won't be shown again.</p>
@@ -27,6 +39,7 @@ templ ProjectShow(session *auth.Session, data ProjectShowData) {
 		}
 
 		<h2>API tokens</h2>
+		<p class="muted">Secret bearers for /v1/* and MCP. Treat like passwords.</p>
 		if len(data.Tokens) == 0 {
 			<p class="muted">No active tokens.</p>
 		} else {
