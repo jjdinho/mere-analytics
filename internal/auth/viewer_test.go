@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	mmigrate "github.com/jjdinho/mere-analytics/internal/migrate"
@@ -54,12 +55,12 @@ func TestViewer_TeamByID_OwnAndCrossUser(t *testing.T) {
 
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	if _, err := vAlice.Teams(ctx).ByID(aliceTeamID); err != nil {
 		t.Errorf("alice should see own team: %v", err)
 	}
 
-	vBob := auth.NewViewer(svc.Queries(), bobID)
+	vBob := auth.NewViewer(svc, bobID)
 	_, err := vBob.Teams(ctx).ByID(aliceTeamID)
 	if !errors.Is(err, auth.ErrNotVisible) {
 		t.Errorf("bob should get ErrNotVisible for alice's team, got: %v", err)
@@ -72,7 +73,7 @@ func TestViewer_ProjectByID_NotVisible_For_OtherUser(t *testing.T) {
 	bobID, _ := signupForTest(t, svc, "bob@example.com")
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	proj, err := vAlice.Projects(ctx).Create(aliceTeamID, "prod")
 	if err != nil {
 		t.Fatalf("alice create project: %v", err)
@@ -86,7 +87,7 @@ func TestViewer_ProjectByID_NotVisible_For_OtherUser(t *testing.T) {
 		t.Errorf("name: got %q want %q", got.Name, "prod")
 	}
 
-	vBob := auth.NewViewer(svc.Queries(), bobID)
+	vBob := auth.NewViewer(svc, bobID)
 	_, err = vBob.Projects(ctx).ByID(proj.ID)
 	if !errors.Is(err, auth.ErrNotVisible) {
 		t.Errorf("bob should get ErrNotVisible for alice's project, got: %v", err)
@@ -98,7 +99,7 @@ func TestViewer_ProjectSoftDelete_HidesFromOwner(t *testing.T) {
 	aliceID, aliceTeamID := signupForTest(t, svc, "alice@example.com")
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	proj, err := vAlice.Projects(ctx).Create(aliceTeamID, "prod")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -122,7 +123,7 @@ func TestViewer_TokenCreateRevoke_Idempotent(t *testing.T) {
 	bobID, _ := signupForTest(t, svc, "bob@example.com")
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	proj, err := vAlice.Projects(ctx).Create(aliceTeamID, "prod")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
@@ -139,7 +140,7 @@ func TestViewer_TokenCreateRevoke_Idempotent(t *testing.T) {
 	}
 
 	// Bob can't revoke alice's token.
-	vBob := auth.NewViewer(svc.Queries(), bobID)
+	vBob := auth.NewViewer(svc, bobID)
 	if err := vBob.Tokens(ctx).Revoke(proj.ID, res.Token.ID); !errors.Is(err, auth.ErrNotVisible) {
 		t.Errorf("bob revoke alice token: got %v want ErrNotVisible", err)
 	}
@@ -164,12 +165,76 @@ func TestViewer_TokenCreateRevoke_Idempotent(t *testing.T) {
 	}
 }
 
+// TestViewer_ProjectCreate_AutoProvisionsPublicToken: every freshly-created
+// project must come with a public_ingest token whose plaintext starts with
+// mere_pub_ and whose hash is sha256(plaintext). The token is fetched via
+// PublicForProject and is NOT in the secret-token list.
+func TestViewer_ProjectCreate_AutoProvisionsPublicToken(t *testing.T) {
+	svc := startService(t)
+	aliceID, aliceTeamID := signupForTest(t, svc, "alice@example.com")
+	ctx := context.Background()
+
+	vAlice := auth.NewViewer(svc, aliceID)
+	proj, err := vAlice.Projects(ctx).Create(aliceTeamID, "prod")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	publicTok, err := vAlice.Tokens(ctx).PublicForProject(proj.ID)
+	if err != nil {
+		t.Fatalf("public for project: %v", err)
+	}
+	if !strings.HasPrefix(publicTok, auth.PublicTokenPrefix) {
+		t.Errorf("public token prefix: got %q want prefix %q", publicTok, auth.PublicTokenPrefix)
+	}
+	if len(publicTok) != auth.TokenPlaintextLength {
+		t.Errorf("public token length: got %d want %d", len(publicTok), auth.TokenPlaintextLength)
+	}
+	if got := auth.TokenKindOf(publicTok); got != auth.TokenKindPublic {
+		t.Errorf("public token kind: got %q want %q", got, auth.TokenKindPublic)
+	}
+
+	// Secret list does NOT include the public token.
+	secrets, err := vAlice.Tokens(ctx).ListForProject(proj.ID)
+	if err != nil {
+		t.Fatalf("list secret tokens: %v", err)
+	}
+	if len(secrets) != 0 {
+		t.Errorf("freshly-created project should have zero secret_api tokens, got %d", len(secrets))
+	}
+}
+
+// TestViewer_ProjectCreate_PublicTokensAreDistinctPerProject: two projects
+// under the same team must end up with two different public tokens (catches
+// any accidental sharing or static defaulting).
+func TestViewer_ProjectCreate_PublicTokensAreDistinctPerProject(t *testing.T) {
+	svc := startService(t)
+	aliceID, aliceTeamID := signupForTest(t, svc, "alice@example.com")
+	ctx := context.Background()
+
+	vAlice := auth.NewViewer(svc, aliceID)
+	p1, _ := vAlice.Projects(ctx).Create(aliceTeamID, "proj-a")
+	p2, _ := vAlice.Projects(ctx).Create(aliceTeamID, "proj-b")
+
+	t1, err := vAlice.Tokens(ctx).PublicForProject(p1.ID)
+	if err != nil {
+		t.Fatalf("p1 public: %v", err)
+	}
+	t2, err := vAlice.Tokens(ctx).PublicForProject(p2.ID)
+	if err != nil {
+		t.Fatalf("p2 public: %v", err)
+	}
+	if t1 == t2 {
+		t.Errorf("two projects ended up with the same public token: %s", t1)
+	}
+}
+
 func TestViewer_TokenList_NeverIncludesPlaintext(t *testing.T) {
 	svc := startService(t)
 	aliceID, aliceTeamID := signupForTest(t, svc, "alice@example.com")
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	proj, _ := vAlice.Projects(ctx).Create(aliceTeamID, "prod")
 	res, _ := vAlice.Tokens(ctx).Create(proj.ID, "ci")
 
@@ -194,7 +259,7 @@ func TestViewer_ListProjectsForTeams_BoundedQuery(t *testing.T) {
 	aliceID, _ := signupForTest(t, svc, "alice@example.com")
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	teams, _ := vAlice.Teams(ctx).List()
 	ids := make([]string, len(teams))
 	for i, t := range teams {

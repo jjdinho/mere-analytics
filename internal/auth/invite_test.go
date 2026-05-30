@@ -18,7 +18,7 @@ func TestConsumeInvite_HappyPath(t *testing.T) {
 	bobID, _ := signupForTest(t, svc, "bob@example.com")
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	res, err := vAlice.CreateInvite(ctx, aliceTeamID, time.Now())
 	if err != nil {
 		t.Fatalf("create invite: %v", err)
@@ -36,7 +36,7 @@ func TestConsumeInvite_HappyPath(t *testing.T) {
 	}
 
 	// Bob is now a member.
-	vBob := auth.NewViewer(svc.Queries(), bobID)
+	vBob := auth.NewViewer(svc, bobID)
 	got, err := vBob.Teams(ctx).ByID(aliceTeamID)
 	if err != nil {
 		t.Fatalf("bob view alice team: %v", err)
@@ -64,7 +64,7 @@ func TestConsumeInvite_AlreadyConsumed(t *testing.T) {
 	carolID, _ := signupForTest(t, svc, "carol@example.com")
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	res, err := vAlice.CreateInvite(ctx, aliceTeamID, time.Now())
 	if err != nil {
 		t.Fatalf("create invite: %v", err)
@@ -86,7 +86,7 @@ func TestConsumeInvite_AlreadyMember(t *testing.T) {
 	aliceID, aliceTeamID := signupForTest(t, svc, "alice@example.com")
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	res, _ := vAlice.CreateInvite(ctx, aliceTeamID, time.Now())
 
 	// Alice consumes her own invite — already a member; should succeed.
@@ -116,7 +116,7 @@ func TestConsumeInvite_RaceOnlyOneWins(t *testing.T) {
 	carolID, _ := signupForTest(t, svc, "carol@example.com")
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	res, _ := vAlice.CreateInvite(ctx, aliceTeamID, time.Now())
 
 	var (
@@ -179,7 +179,7 @@ func TestSignupWithInvite_HappyPath(t *testing.T) {
 	aliceID, aliceTeamID := signupForTest(t, svc, "alice@example.com")
 	ctx := context.Background()
 
-	vAlice := auth.NewViewer(svc.Queries(), aliceID)
+	vAlice := auth.NewViewer(svc, aliceID)
 	res, _ := vAlice.CreateInvite(ctx, aliceTeamID, time.Now())
 
 	result, err := svc.SignupWithInvite(ctx, auth.SignupRequest{
@@ -191,7 +191,7 @@ func TestSignupWithInvite_HappyPath(t *testing.T) {
 	}
 
 	// New user is in both the personal team AND alice's team.
-	vNew := auth.NewViewer(svc.Queries(), result.User.ID)
+	vNew := auth.NewViewer(svc, result.User.ID)
 	teams, err := vNew.Teams(ctx).List()
 	if err != nil {
 		t.Fatalf("list teams: %v", err)

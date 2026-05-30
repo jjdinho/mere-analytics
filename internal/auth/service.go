@@ -329,6 +329,70 @@ func isUniqueViolation(err error, constraint string) bool {
 func (s *Service) Queries() *db.Queries { return s.queries }
 
 // ──────────────────────────────────────────────────────────────────────
+// Project create (with auto-provisioned public token)
+// ──────────────────────────────────────────────────────────────────────
+
+// createProjectWithPublicToken inserts the project + its bootstrap public
+// ingest token in a single transaction. Membership is enforced by the
+// project INSERT's WHERE EXISTS clause; pgx.ErrNoRows on that step (no
+// matching membership row) surfaces as ErrNotVisible and the tx aborts.
+//
+// The public token is the snippet token that lives in client HTML — it's
+// non-secret. We persist both token_plaintext (so the project page can
+// re-display it on every visit) and token_hash (for the future bearer
+// middleware's indexed lookup). The partial unique index
+// api_tokens_one_active_public_per_project_idx guarantees at most one
+// active public token per project; a concurrent insert would fail loudly
+// and abort the tx.
+//
+// Called via Viewer.Projects.Create. Lowercase because external callers
+// should go through the viewer chain (matches ConsumeInvite's exported
+// pattern — exported only when the web layer calls it directly).
+func (s *Service) createProjectWithPublicToken(ctx context.Context, userID, teamID, name string) (db.Project, error) {
+	plaintext, hashHex, err := GenerateToken(TokenKindPublic)
+	if err != nil {
+		return db.Project{}, fmt.Errorf("project create: generate public token: %w", err)
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return db.Project{}, fmt.Errorf("project create: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := s.queries.WithTx(tx)
+
+	proj, err := q.CreateProjectForUser(ctx, db.CreateProjectForUserParams{
+		ID:     idgen.New(),
+		TeamID: teamID,
+		Name:   name,
+		UserID: userID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		// INSERT ... SELECT ... WHERE EXISTS returned no row — caller is not
+		// a team member.
+		return db.Project{}, ErrNotVisible
+	}
+	if err != nil {
+		return db.Project{}, fmt.Errorf("project create: insert project: %w", err)
+	}
+
+	if err := q.InsertPublicAPIToken(ctx, db.InsertPublicAPITokenParams{
+		ID:             idgen.New(),
+		ProjectID:      proj.ID,
+		Name:           "snippet",
+		TokenHash:      hashHex,
+		TokenPlaintext: &plaintext,
+	}); err != nil {
+		return db.Project{}, fmt.Errorf("project create: insert public token: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return db.Project{}, fmt.Errorf("project create: commit: %w", err)
+	}
+	return proj, nil
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Invite consume
 // ──────────────────────────────────────────────────────────────────────
 

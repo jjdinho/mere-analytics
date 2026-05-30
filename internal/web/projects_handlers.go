@@ -28,13 +28,23 @@ func getProject(logger *slog.Logger) http.HandlerFunc {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
+		publicToken, err := v.Tokens(r.Context()).PublicForProject(projectID)
+		if err != nil {
+			logger.Error("project public token fetch", "err", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 		tokens, err := v.Tokens(r.Context()).ListForProject(projectID)
 		if err != nil {
 			logger.Error("project tokens list", "err", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
-		renderProjectShow(w, r, sess, views.ProjectShowData{Project: proj, Tokens: tokens})
+		renderProjectShow(w, r, sess, views.ProjectShowData{
+			Project:     proj,
+			PublicToken: publicToken,
+			Tokens:      tokens,
+		})
 	}
 }
 
@@ -84,6 +94,12 @@ func postProjectTokens(logger *slog.Logger) http.HandlerFunc {
 		}
 		name, err := auth.ValidateName("Token", r.PostForm.Get("name"))
 		if err != nil {
+			publicToken, perr := v.Tokens(r.Context()).PublicForProject(projectID)
+			if perr != nil {
+				logger.Error("token create: public fetch after validation", "err", perr)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
 			tokens, terr := v.Tokens(r.Context()).ListForProject(projectID)
 			if terr != nil {
 				logger.Error("token create: list after validation", "err", terr)
@@ -92,9 +108,10 @@ func postProjectTokens(logger *slog.Logger) http.HandlerFunc {
 			}
 			w.WriteHeader(http.StatusBadRequest)
 			renderProjectShow(w, r, sess, views.ProjectShowData{
-				Project: proj,
-				Tokens:  tokens,
-				ErrMsg:  err.Error(),
+				Project:     proj,
+				PublicToken: publicToken,
+				Tokens:      tokens,
+				ErrMsg:      err.Error(),
 			})
 			return
 		}
@@ -110,6 +127,12 @@ func postProjectTokens(logger *slog.Logger) http.HandlerFunc {
 			return
 		}
 
+		publicToken, err := v.Tokens(r.Context()).PublicForProject(projectID)
+		if err != nil {
+			logger.Error("token create: public fetch after create", "err", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 		tokens, err := v.Tokens(r.Context()).ListForProject(projectID)
 		if err != nil {
 			logger.Error("token create: list after create", "err", err)
@@ -117,9 +140,10 @@ func postProjectTokens(logger *slog.Logger) http.HandlerFunc {
 			return
 		}
 		renderProjectShow(w, r, sess, views.ProjectShowData{
-			Project:  proj,
-			Tokens:   tokens,
-			NewToken: result.Plaintext,
+			Project:     proj,
+			PublicToken: publicToken,
+			Tokens:      tokens,
+			NewToken:    result.Plaintext,
 		})
 	}
 }
