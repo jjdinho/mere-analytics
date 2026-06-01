@@ -88,32 +88,28 @@ type ConsumedCode struct {
 	Scope     string
 }
 
-// ConsumeCode marks the code used (one-shot), verifies PKCE, and returns the
-// bound identity so the token handler can mint the access token in the same
-// transaction. Errors are mapped to OAuth codes by the caller.
+// ConsumeCode validates the bound (client_id, redirect_uri, PKCE) tuple and
+// only then marks the code used. The two-step lookup-then-update lets a
+// failed PKCE / client / redirect check leave the code intact so a legitimate
+// retry (typo'd verifier, retried CLI request) doesn't force the user back
+// through /oauth/authorize.
 //
-// Atomicity: SELECT-FOR-UPDATE is unnecessary because the UPDATE itself
-// filters used_at IS NULL — concurrent /oauth/token calls race on the row,
-// and exactly one succeeds. The losing call gets pgx.ErrNoRows.
+// One-shot is enforced by the UPDATE's `WHERE used_at IS NULL` predicate:
+// a parallel /oauth/token call racing on the same code sees RowsAffected
+// == 0 on the loser, which maps to invalid_grant. No transaction is needed
+// — the UPDATE itself is the atomic boundary.
 func (s *Service) ConsumeCode(ctx context.Context, p ConsumeCodeParams) (ConsumedCode, error) {
 	if p.Code == "" || p.CodeVerifier == "" {
 		return ConsumedCode{}, fmt.Errorf("%w: code and code_verifier required", ErrInvalidRequest)
 	}
 	hashHex := auth.HashToken(p.Code)
 
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return ConsumedCode{}, fmt.Errorf("consume code: begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	q := s.queries.WithTx(tx)
-
-	row, err := q.ConsumeOAuthCode(ctx, hashHex)
+	row, err := s.queries.GetActiveOAuthCodeByHash(ctx, hashHex)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ConsumedCode{}, ErrInvalidGrant
 	}
 	if err != nil {
-		return ConsumedCode{}, fmt.Errorf("consume code: %w", err)
+		return ConsumedCode{}, fmt.Errorf("consume code: lookup: %w", err)
 	}
 
 	if row.ClientID != p.ClientID {
@@ -126,8 +122,14 @@ func (s *Service) ConsumeCode(ctx context.Context, p ConsumeCodeParams) (Consume
 		return ConsumedCode{}, ErrInvalidGrant
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return ConsumedCode{}, fmt.Errorf("consume code: commit: %w", err)
+	affected, err := s.queries.MarkOAuthCodeUsed(ctx, row.ID)
+	if err != nil {
+		return ConsumedCode{}, fmt.Errorf("consume code: mark used: %w", err)
+	}
+	if affected == 0 {
+		// Concurrent /oauth/token won the race — fall through to the same
+		// invalid_grant the lookup-miss path produces.
+		return ConsumedCode{}, ErrInvalidGrant
 	}
 	return ConsumedCode{
 		ClientID:  row.ClientID,

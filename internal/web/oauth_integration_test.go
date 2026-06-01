@@ -420,3 +420,96 @@ func TestOAuth_ApproveForNonMemberProject_Forbidden(t *testing.T) {
 		t.Errorf("status: %d want 403", resp.StatusCode)
 	}
 }
+
+// TestOAuth_RedirectURIWithQueryString_AppendsCodeWithAmpersand registers a
+// client whose redirect_uri already carries a query string (RFC 6749 §3.1.2
+// allows this) and confirms the success redirect joins `code`/`state` with
+// `&`, not a second `?`. Regression guard for the buggy "?"-only join.
+func TestOAuth_RedirectURIWithQueryString_AppendsCodeWithAmpersand(t *testing.T) {
+	srv, authSvc, _ := startOAuthStack(t)
+	c, _, projectID := seedOAuthUserAndProject(t, srv, authSvc, "alice@example.com")
+	redirect := "http://localhost:9999/cb?env=prod"
+	clientID := registerOAuthClient(t, srv, redirect)
+	_, challenge := newPKCEPair(t)
+
+	_, body := mustGet(t, c, authorizeURL(srv.URL, clientID, redirect, "xyz", challenge))
+	csrf := extractCSRFToken(t, body)
+	resp, err := c.PostForm(srv.URL+"/oauth/authorize", url.Values{
+		"csrf_token":            {csrf},
+		"client_id":             {clientID},
+		"redirect_uri":          {redirect},
+		"state":                 {"xyz"},
+		"scope":                 {oauth.ScopeAPI},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"response_type":         {"code"},
+		"decision":              {"approve"},
+		"project_id":            {projectID},
+	})
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status: %d want 303", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	if strings.Count(loc, "?") != 1 {
+		t.Errorf("Location has multiple '?': %s", loc)
+	}
+	parsed, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if parsed.Query().Get("env") != "prod" {
+		t.Errorf("env query lost: %s", loc)
+	}
+	if parsed.Query().Get("code") == "" {
+		t.Errorf("code missing: %s", loc)
+	}
+	if parsed.Query().Get("state") != "xyz" {
+		t.Errorf("state missing: %s", loc)
+	}
+}
+
+// TestOAuth_RedirectURIWithQueryString_ErrorAlsoUsesAmpersand mirrors the
+// success-path test for the error redirect: a deny decision with a query-
+// string redirect URI must produce a single-? URL with `error`/`state`
+// joined by `&`.
+func TestOAuth_RedirectURIWithQueryString_ErrorAlsoUsesAmpersand(t *testing.T) {
+	srv, authSvc, _ := startOAuthStack(t)
+	c, _, projectID := seedOAuthUserAndProject(t, srv, authSvc, "alice@example.com")
+	redirect := "http://localhost:9999/cb?env=prod"
+	clientID := registerOAuthClient(t, srv, redirect)
+	_, challenge := newPKCEPair(t)
+
+	_, body := mustGet(t, c, authorizeURL(srv.URL, clientID, redirect, "abc", challenge))
+	csrf := extractCSRFToken(t, body)
+	resp, err := c.PostForm(srv.URL+"/oauth/authorize", url.Values{
+		"csrf_token":            {csrf},
+		"client_id":             {clientID},
+		"redirect_uri":          {redirect},
+		"state":                 {"abc"},
+		"scope":                 {oauth.ScopeAPI},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"response_type":         {"code"},
+		"decision":              {"deny"},
+		"project_id":            {projectID},
+	})
+	if err != nil {
+		t.Fatalf("deny: %v", err)
+	}
+	defer resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	if strings.Count(loc, "?") != 1 {
+		t.Errorf("Location has multiple '?': %s", loc)
+	}
+	parsed, _ := url.Parse(loc)
+	if parsed.Query().Get("error") != "access_denied" {
+		t.Errorf("error code missing: %s", loc)
+	}
+	if parsed.Query().Get("env") != "prod" {
+		t.Errorf("env query lost: %s", loc)
+	}
+}

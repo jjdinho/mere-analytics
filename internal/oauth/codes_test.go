@@ -223,6 +223,87 @@ func TestConsumeCode_PKCEMismatch(t *testing.T) {
 	}
 }
 
+// TestConsumeCode_FailedValidation_LeavesCodeUsable pins the lookup-before-
+// update contract: a wrong client_id / redirect_uri / PKCE verifier must not
+// burn the code. Without this guarantee a transient mismatch (e.g., wrong
+// verifier from a buggy CLI) would force the user to restart the whole
+// /oauth/authorize flow.
+func TestConsumeCode_FailedValidation_LeavesCodeUsable(t *testing.T) {
+	oauthSvc, authSvc, _ := fixture(t)
+	userID, projectID := seedUserAndProject(t, authSvc, "alice@example.com")
+	client := registerClient(t, oauthSvc, "http://localhost:9999/cb")
+	otherClient := registerClient(t, oauthSvc, "http://localhost:9999/cb")
+	verifier, challenge := pkcePair(t)
+	ctx := context.Background()
+
+	mint := func() string {
+		code, err := oauthSvc.IssueCode(ctx, oauth.IssueCodeParams{
+			ClientID:            client.ID,
+			UserID:              userID,
+			ProjectID:           projectID,
+			RedirectURI:         "http://localhost:9999/cb",
+			Scope:               oauth.ScopeAPI,
+			CodeChallenge:       challenge,
+			CodeChallengeMethod: oauth.CodeChallengeMethodS256,
+		})
+		if err != nil {
+			t.Fatalf("issue code: %v", err)
+		}
+		return code
+	}
+
+	type failure struct {
+		name   string
+		params oauth.ConsumeCodeParams
+	}
+
+	for _, f := range []failure{
+		{
+			name: "wrong client",
+			params: oauth.ConsumeCodeParams{
+				ClientID: otherClient.ID, RedirectURI: "http://localhost:9999/cb",
+				CodeVerifier: verifier,
+			},
+		},
+		{
+			name: "wrong redirect uri",
+			params: oauth.ConsumeCodeParams{
+				ClientID: client.ID, RedirectURI: "http://localhost:9999/wrong",
+				CodeVerifier: verifier,
+			},
+		},
+		{
+			name: "wrong verifier",
+			params: oauth.ConsumeCodeParams{
+				ClientID: client.ID, RedirectURI: "http://localhost:9999/cb",
+				CodeVerifier: strings.Repeat("x", 43),
+			},
+		},
+	} {
+		t.Run(f.name, func(t *testing.T) {
+			code := mint()
+			f.params.Code = code
+
+			if _, err := oauthSvc.ConsumeCode(ctx, f.params); !errors.Is(err, oauth.ErrInvalidGrant) {
+				t.Fatalf("first consume: got %v want ErrInvalidGrant", err)
+			}
+			// Same code, this time with the right values, must still succeed.
+			consumed, err := oauthSvc.ConsumeCode(ctx, oauth.ConsumeCodeParams{
+				Code:         code,
+				ClientID:     client.ID,
+				RedirectURI:  "http://localhost:9999/cb",
+				CodeVerifier: verifier,
+			})
+			if err != nil {
+				t.Fatalf("legitimate retry after %s: %v", f.name, err)
+			}
+			if consumed.UserID != userID || consumed.ProjectID != projectID {
+				t.Errorf("identity mismatch on retry: %+v", consumed)
+			}
+		})
+	}
+}
+
 func TestConsumeCode_Expired(t *testing.T) {
 	oauthSvc, authSvc, _ := fixture(t)
 	userID, projectID := seedUserAndProject(t, authSvc, "alice@example.com")

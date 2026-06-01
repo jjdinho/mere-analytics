@@ -69,15 +69,14 @@ func FromContext(ctx context.Context) *AccessContext {
 	return ac
 }
 
-// Service is the package's stateful entrypoint. It bundles the pgx pool with
-// the sqlc queries handle and exposes Issue/Consume/Lookup operations the
-// HTTP handlers compose. now() is overridable for deterministic expiry tests.
+// Service is the package's stateful entrypoint. It wraps the sqlc queries
+// handle and exposes Issue/Consume/Lookup operations the HTTP handlers
+// compose. now() is overridable for deterministic expiry tests.
 type Service struct {
-	pool                  *pgxpool.Pool
-	queries               *db.Queries
-	now                   func() time.Time
-	AccessTokenTTL        time.Duration
-	AuthorizationCodeTTL  time.Duration
+	queries              *db.Queries
+	now                  func() time.Time
+	AccessTokenTTL       time.Duration
+	AuthorizationCodeTTL time.Duration
 }
 
 // NewService builds a Service bound to pool with default TTLs. Callers tweak
@@ -85,7 +84,6 @@ type Service struct {
 // overrides; tests reach for SetNow.
 func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{
-		pool:                 pool,
 		queries:              db.New(pool),
 		now:                  time.Now,
 		AccessTokenTTL:       DefaultAccessTokenTTL,

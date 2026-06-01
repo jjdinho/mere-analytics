@@ -227,7 +227,7 @@ func postOAuthAuthorize(authSvc *auth.Service, oauthSvc *oauth.Service, logger *
 		if params.State != "" {
 			q.Set("state", params.State)
 		}
-		http.Redirect(w, r, params.RedirectURI+"?"+q.Encode(), http.StatusSeeOther)
+		http.Redirect(w, r, appendQuery(params.RedirectURI, q), http.StatusSeeOther)
 	}
 }
 
@@ -373,11 +373,26 @@ func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURI, errC
 	if state != "" {
 		q.Set("state", state)
 	}
+	http.Redirect(w, r, appendQuery(redirectURI, q), http.StatusSeeOther)
+}
+
+// appendQuery merges q onto uri. RFC 6749 §3.1.2 allows a registered
+// redirect_uri to already carry a query string, so we pick `&` vs `?` from
+// the existing URI to avoid producing a malformed `...?env=prod?code=...`
+// URL on the OAuth success or error redirect.
+func appendQuery(uri string, q url.Values) string {
+	encoded := q.Encode()
+	if encoded == "" {
+		return uri
+	}
 	sep := "?"
-	if strings.Contains(redirectURI, "?") {
+	if strings.Contains(uri, "?") {
 		sep = "&"
 	}
-	http.Redirect(w, r, redirectURI+sep+q.Encode(), http.StatusSeeOther)
+	if strings.HasSuffix(uri, "?") || strings.HasSuffix(uri, "&") {
+		sep = ""
+	}
+	return uri + sep + encoded
 }
 
 func writeOAuthJSONError(w http.ResponseWriter, status int, errCode, description string) {
