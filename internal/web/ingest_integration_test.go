@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/testcontainers/testcontainers-go"
 
 	"github.com/jjdinho/mere-analytics/internal/auth"
 	"github.com/jjdinho/mere-analytics/internal/clickhouse"
@@ -34,12 +35,14 @@ import (
 // services backing /v1/whoami's bearer + the project-creation flow used to
 // mint a mere_pub_ token.
 type ingestStack struct {
-	srv       *httptest.Server
-	authSvc   *auth.Service
-	oauthSvc  *oauth.Service
-	ingestSvc *ingest.Service
-	pgPool    *pgxpool.Pool
-	chAdmin   *sql.DB
+	srv         *httptest.Server
+	authSvc     *auth.Service
+	oauthSvc    *oauth.Service
+	ingestSvc   *ingest.Service
+	pgPool      *pgxpool.Pool
+	chAdmin     *sql.DB
+	pgContainer testcontainers.Container
+	chContainer testcontainers.Container
 }
 
 // startIngestStack runs the full PG+CH bring-up + migrations once per test,
@@ -49,10 +52,37 @@ type ingestStack struct {
 // opts mutators let tests tweak the ingest.Options before NewService.
 func startIngestStack(t *testing.T, opts ...func(*ingest.Options)) *ingestStack {
 	t.Helper()
+	pgPool, pgCfg := testhelpers.StartPostgres(t)
+	chAdmin, chCfg := testhelpers.StartClickHouse(t)
+	return assembleIngestStack(t, pgPool, pgCfg, chAdmin, chCfg, nil, nil, opts...)
+}
+
+// startIngestChaosStack is startIngestStack with the raw container handles
+// exposed so a test can Stop/Start the actual PG/CH dependencies and assert
+// the pipeline heals itself (DLQ drains back into CH; the fatal flag clears).
+// It uses the …C helpers; everything downstream is shared with
+// startIngestStack.
+func startIngestChaosStack(t *testing.T, opts ...func(*ingest.Options)) *ingestStack {
+	t.Helper()
+	pgPool, pgCfg, pgContainer := testhelpers.StartPostgresC(t)
+	chAdmin, chCfg, chContainer := testhelpers.StartClickHouseC(t)
+	return assembleIngestStack(t, pgPool, pgCfg, chAdmin, chCfg, pgContainer, chContainer, opts...)
+}
+
+// assembleIngestStack runs migrations against the supplied PG+CH handles and
+// wires the ingest.Service + web.Handler. Shared by both stack constructors;
+// the container args are nil for the non-chaos path.
+func assembleIngestStack(
+	t *testing.T,
+	pgPool *pgxpool.Pool, pgCfg config.Config,
+	chAdmin *sql.DB, chCfg config.Config,
+	pgContainer, chContainer testcontainers.Container,
+	opts ...func(*ingest.Options),
+) *ingestStack {
+	t.Helper()
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	pgPool, pgCfg := testhelpers.StartPostgres(t)
 	pgDrv, err := postgres.MigrateDriver(pgCfg)
 	if err != nil {
 		t.Fatalf("pg migrate driver: %v", err)
@@ -61,7 +91,6 @@ func startIngestStack(t *testing.T, opts ...func(*ingest.Options)) *ingestStack 
 		t.Fatalf("pg migrate: %v", err)
 	}
 
-	chAdmin, chCfg := testhelpers.StartClickHouse(t)
 	chDrv, err := clickhouse.MigrateDriver(chAdmin, chCfg)
 	if err != nil {
 		t.Fatalf("ch migrate driver: %v", err)
@@ -107,12 +136,14 @@ func startIngestStack(t *testing.T, opts ...func(*ingest.Options)) *ingestStack 
 	t.Cleanup(srv.Close)
 
 	return &ingestStack{
-		srv:       srv,
-		authSvc:   authSvc,
-		oauthSvc:  oauthSvc,
-		ingestSvc: ingestSvc,
-		pgPool:    pgPool,
-		chAdmin:   chAdmin,
+		srv:         srv,
+		authSvc:     authSvc,
+		oauthSvc:    oauthSvc,
+		ingestSvc:   ingestSvc,
+		pgPool:      pgPool,
+		chAdmin:     chAdmin,
+		pgContainer: pgContainer,
+		chContainer: chContainer,
 	}
 }
 

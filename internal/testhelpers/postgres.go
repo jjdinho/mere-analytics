@@ -23,8 +23,27 @@ import (
 // StartPostgres boots a fresh postgres:16 container, waits until it accepts
 // connections, and returns a connected pgxpool plus a Config pre-populated
 // with the container's host/port and credentials. The container and pool are
-// torn down via t.Cleanup.
+// torn down via t.Cleanup. The host port is ephemeral.
 func StartPostgres(t *testing.T) (*pgxpool.Pool, config.Config) {
+	t.Helper()
+	pool, cfg, _ := startPostgres(t, 0)
+	return pool, cfg
+}
+
+// StartPostgresC is StartPostgres plus the raw container handle, for tests that
+// Stop/Start the dependency to exercise recovery paths. Unlike StartPostgres it
+// pins a fixed host port, because Docker reassigns an ephemeral port on
+// Stop/Start — pinning lets the returned pool reconnect on the same address
+// after a restart.
+func StartPostgresC(t *testing.T) (*pgxpool.Pool, config.Config, testcontainers.Container) {
+	t.Helper()
+	return startPostgres(t, freeHostPort(t))
+}
+
+// startPostgres is the shared bring-up. fixedPort==0 publishes 5432 to an
+// ephemeral host port; a non-zero fixedPort pins it so it survives a Stop/Start
+// cycle.
+func startPostgres(t *testing.T, fixedPort int) (*pgxpool.Pool, config.Config, testcontainers.Container) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -34,8 +53,7 @@ func StartPostgres(t *testing.T) (*pgxpool.Pool, config.Config) {
 		dbPass = "devpass"
 	)
 
-	container, err := tcpostgres.Run(ctx,
-		"postgres:16-alpine",
+	opts := []testcontainers.ContainerCustomizer{
 		tcpostgres.WithDatabase(dbName),
 		tcpostgres.WithUsername(dbUser),
 		tcpostgres.WithPassword(dbPass),
@@ -43,7 +61,12 @@ func StartPostgres(t *testing.T) (*pgxpool.Pool, config.Config) {
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
 				WithStartupTimeout(60*time.Second)),
-	)
+	}
+	if fixedPort != 0 {
+		opts = append(opts, pinHostPort(t, "5432/tcp", fixedPort))
+	}
+
+	container, err := tcpostgres.Run(ctx, "postgres:16-alpine", opts...)
 	if err != nil {
 		t.Fatalf("start postgres container: %v", err)
 	}
@@ -85,7 +108,7 @@ func StartPostgres(t *testing.T) (*pgxpool.Pool, config.Config) {
 		t.Fatalf("pgxpool ping: %v", err)
 	}
 
-	return pool, cfg
+	return pool, cfg, container
 }
 
 func dsnFromConfig(c config.Config) string {
