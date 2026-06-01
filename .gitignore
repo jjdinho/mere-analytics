@@ -3,6 +3,9 @@
 /out/
 /dist/
 mere-server
+mere-maintenance
+/server
+/maintenance
 
 # Test artifacts
 *.test

@@ -24,6 +24,14 @@ SET revoked_at = NOW()
 WHERE token_hash = $1
   AND revoked_at IS NULL;
 
+-- name: DeleteExpiredOAuthAccessTokens :execrows
+-- Called by cmd/maintenance. Sweeps tokens past their expires_at. Revoked-
+-- but-not-yet-expired rows are deliberately left alone: the 1h TTL means
+-- they vanish on the next sweep anyway, and keeping them preserves the
+-- option to surface a revoked-tokens audit view without a schema change.
+DELETE FROM oauth_access_tokens
+WHERE expires_at < NOW();
+
 -- name: ListActiveAccessTokensForUser :many
 -- Future "connected apps" page. Returns the joinable surface (client name +
 -- project id + scope + lifecycle timestamps) for the viewer's active grants.

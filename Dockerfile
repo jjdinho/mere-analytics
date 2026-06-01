@@ -13,12 +13,18 @@ RUN go mod download
 COPY . .
 RUN templ generate
 RUN CGO_ENABLED=0 go build -ldflags='-s -w' -trimpath -o /out/mere-server ./cmd/server
+RUN CGO_ENABLED=0 go build -ldflags='-s -w' -trimpath -o /out/mere-maintenance ./cmd/maintenance
 
 # Runtime: minimal alpine + non-root user. Migrations are embedded in the
 # binary via the //go:embed directive in migrations/migrations.go, so no
 # need to COPY /migrations into this stage.
+#
+# Two binaries ship in the image: mere-server (the HTTP entrypoint) and
+# mere-maintenance (one-shot cleanup, invoked by host cron / Kamal scheduled
+# task; never started in-process by the server).
 FROM alpine:3.19
 RUN adduser -D -u 65532 mere
 COPY --from=build /out/mere-server /mere-server
+COPY --from=build /out/mere-maintenance /mere-maintenance
 USER mere
 ENTRYPOINT ["/mere-server"]

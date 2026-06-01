@@ -41,3 +41,12 @@ UPDATE oauth_codes
 SET used_at = NOW()
 WHERE id = $1
   AND used_at IS NULL;
+
+-- name: DeleteExpiredOAuthCodes :execrows
+-- Called by cmd/maintenance. Codes have a 10-min TTL and are one-shot, so any
+-- row past expires_at is unreachable (an active /oauth/token call would have
+-- already failed the GetActiveOAuthCodeByHash predicate). Used-but-not-yet-
+-- expired codes are kept until the same predicate sweeps them — keeps this
+-- query a single, unambiguous filter.
+DELETE FROM oauth_codes
+WHERE expires_at < NOW();

@@ -11,6 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteExpiredOAuthCodes = `-- name: DeleteExpiredOAuthCodes :execrows
+DELETE FROM oauth_codes
+WHERE expires_at < NOW()
+`
+
+// Called by cmd/maintenance. Codes have a 10-min TTL and are one-shot, so any
+// row past expires_at is unreachable (an active /oauth/token call would have
+// already failed the GetActiveOAuthCodeByHash predicate). Used-but-not-yet-
+// expired codes are kept until the same predicate sweeps them — keeps this
+// query a single, unambiguous filter.
+func (q *Queries) DeleteExpiredOAuthCodes(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredOAuthCodes)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getActiveOAuthCodeByHash = `-- name: GetActiveOAuthCodeByHash :one
 SELECT id, code_hash, client_id, user_id, project_id,
        redirect_uri, scope, code_challenge, code_challenge_method,

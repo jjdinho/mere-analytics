@@ -11,6 +11,23 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteExpiredOAuthAccessTokens = `-- name: DeleteExpiredOAuthAccessTokens :execrows
+DELETE FROM oauth_access_tokens
+WHERE expires_at < NOW()
+`
+
+// Called by cmd/maintenance. Sweeps tokens past their expires_at. Revoked-
+// but-not-yet-expired rows are deliberately left alone: the 1h TTL means
+// they vanish on the next sweep anyway, and keeping them preserves the
+// option to surface a revoked-tokens audit view without a schema change.
+func (q *Queries) DeleteExpiredOAuthAccessTokens(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredOAuthAccessTokens)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getActiveOAuthAccessTokenByHash = `-- name: GetActiveOAuthAccessTokenByHash :one
 SELECT id, token_hash, client_id, user_id, project_id, scope,
        expires_at, revoked_at, created_at
