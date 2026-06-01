@@ -23,6 +23,7 @@ func validEnv() map[string]string {
 		"CLICKHOUSE_HOST":              "ch.example",
 		"CLICKHOUSE_ADMIN_PASSWORD":    "chadmin",
 		"CLICKHOUSE_READONLY_PASSWORD": "chro",
+		"OAUTH_ISSUER_URL":             "https://mere.example",
 	}
 }
 
@@ -56,6 +57,7 @@ func TestLoad_missingRequiredVars(t *testing.T) {
 		"CLICKHOUSE_HOST",
 		"CLICKHOUSE_ADMIN_PASSWORD",
 		"CLICKHOUSE_READONLY_PASSWORD",
+		"OAUTH_ISSUER_URL",
 	}
 	for _, missing := range required {
 		t.Run("missing_"+missing, func(t *testing.T) {

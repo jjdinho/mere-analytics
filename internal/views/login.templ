@@ -4,10 +4,14 @@ package views
 // arrived via /login?invite=:t — the hidden field threads it through to
 // POST /login, which consumes the invite after a successful auth.
 //
+// next is the post-login redirect target (e.g. /oauth/authorize?…) used by
+// the OAuth bounce. The handler validates it through safeRedirect before
+// trusting it; the view just renders whatever non-empty value it gets.
+//
 // There is no public signup. New users without an invite can't create an
 // account from this page; new users with an invite get a "back to invite"
 // link instead, which lands them on the invite page's inline signup form.
-templ Login(emailValue, errMsg, invitePlaintext, inviteTeamName string) {
+templ Login(emailValue, errMsg, invitePlaintext, inviteTeamName, next string) {
 	@Layout("Log in", nil) {
 		if inviteTeamName != "" {
 			<h1>Log in to join { inviteTeamName }</h1>
@@ -19,6 +23,9 @@ templ Login(emailValue, errMsg, invitePlaintext, inviteTeamName string) {
 			@CSRFField()
 			if invitePlaintext != "" {
 				<input type="hidden" name="invite" value={ invitePlaintext }/>
+			}
+			if next != "" {
+				<input type="hidden" name="next" value={ next }/>
 			}
 			<label>
 				Email

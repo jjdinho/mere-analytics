@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -29,6 +30,13 @@ type Config struct {
 	ClickHouseAdminPassword    string `env:"CLICKHOUSE_ADMIN_PASSWORD,required"`
 	ClickHouseReadonlyUser     string `env:"CLICKHOUSE_READONLY_USER" envDefault:"mere_readonly"`
 	ClickHouseReadonlyPassword string `env:"CLICKHOUSE_READONLY_PASSWORD,required"`
+
+	// OAuthIssuerURL is the externally reachable base URL the OAuth server
+	// advertises in its discovery document and signs authorization redirects
+	// against. Required because the discovery JSON must be absolute.
+	OAuthIssuerURL            string        `env:"OAUTH_ISSUER_URL,required"`
+	OAuthAccessTokenTTL       time.Duration `env:"OAUTH_ACCESS_TOKEN_TTL" envDefault:"1h"`
+	OAuthAuthorizationCodeTTL time.Duration `env:"OAUTH_AUTHORIZATION_CODE_TTL" envDefault:"10m"`
 }
 
 func Load() (Config, error) {
@@ -59,6 +67,7 @@ func (c Config) validate() error {
 	check("CLICKHOUSE_ADMIN_PASSWORD", c.ClickHouseAdminPassword)
 	check("CLICKHOUSE_READONLY_USER", c.ClickHouseReadonlyUser)
 	check("CLICKHOUSE_READONLY_PASSWORD", c.ClickHouseReadonlyPassword)
+	check("OAUTH_ISSUER_URL", c.OAuthIssuerURL)
 	if len(missing) > 0 {
 		return fmt.Errorf("required env vars empty: %s", strings.Join(missing, ", "))
 	}
@@ -92,5 +101,8 @@ func (c Config) LogValue() slog.Value {
 		slog.String("clickhouse_admin_password", "[REDACTED]"),
 		slog.String("clickhouse_readonly_user", c.ClickHouseReadonlyUser),
 		slog.String("clickhouse_readonly_password", "[REDACTED]"),
+		slog.String("oauth_issuer_url", c.OAuthIssuerURL),
+		slog.Duration("oauth_access_token_ttl", c.OAuthAccessTokenTTL),
+		slog.Duration("oauth_authorization_code_ttl", c.OAuthAuthorizationCodeTTL),
 	)
 }

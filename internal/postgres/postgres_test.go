@@ -48,8 +48,13 @@ func TestOpen_AndRunMigrations_Idempotent(t *testing.T) {
 		t.Fatalf("migrate second run (must be idempotent): %v", err)
 	}
 
-	// All 7 application tables exist (step 4 added team_invites).
-	wantTables := []string{"api_tokens", "projects", "sessions", "team_invites", "team_memberships", "teams", "users"}
+	// All application tables exist (step 5 added oauth_*).
+	wantTables := []string{
+		"api_tokens",
+		"oauth_access_tokens", "oauth_clients", "oauth_codes",
+		"projects", "sessions", "team_invites", "team_memberships",
+		"teams", "users",
+	}
 	gotTables := listTables(t, pool)
 	if !equalStrSlices(gotTables, wantTables) {
 		t.Errorf("tables: got %v want %v", gotTables, wantTables)
@@ -60,12 +65,15 @@ func TestOpen_AndRunMigrations_Idempotent(t *testing.T) {
 		"users_email_lower_idx",
 		"api_tokens_token_hash_active_idx",
 		"api_tokens_project_id_idx",
-		"api_tokens_one_active_public_per_project_idx",
+		"api_tokens_one_active_per_project_idx",
 		"projects_team_id_idx",
 		"sessions_user_id_idx",
 		"team_memberships_user_id_idx",
 		"team_invites_token_hash_active_idx",
 		"team_invites_team_id_idx",
+		"oauth_codes_code_hash_idx",
+		"oauth_access_tokens_hash_active_idx",
+		"oauth_access_tokens_user_id_idx",
 	}
 	for _, idx := range wantIndexes {
 		if !indexExists(t, pool, idx) {

@@ -9,62 +9,14 @@ import (
 	"context"
 )
 
-const createAPITokenForUser = `-- name: CreateAPITokenForUser :one
-INSERT INTO api_tokens (id, project_id, name, token_hash, kind, token_plaintext)
-SELECT $1, $2, $3, $4, 'secret_api', NULL
-WHERE EXISTS (
-    SELECT 1
-    FROM projects p
-    JOIN team_memberships tm ON tm.team_id = p.team_id
-    WHERE p.id = $2
-      AND tm.user_id = $5
-      AND p.deleted_at IS NULL
-)
-RETURNING id, project_id, name, token_hash, created_at, revoked_at, kind, token_plaintext
-`
-
-type CreateAPITokenForUserParams struct {
-	ID        string
-	ProjectID string
-	Name      string
-	TokenHash string
-	UserID    string
-}
-
-// Issues a secret_api token. Same WHERE-EXISTS pattern as project create:
-// only succeeds when the caller is a member of the project's team AND the
-// project is not soft-deleted. Public tokens are NOT issued via this path —
-// they are bootstrapped in the project-create tx via InsertPublicAPIToken.
-func (q *Queries) CreateAPITokenForUser(ctx context.Context, arg CreateAPITokenForUserParams) (ApiToken, error) {
-	row := q.db.QueryRow(ctx, createAPITokenForUser,
-		arg.ID,
-		arg.ProjectID,
-		arg.Name,
-		arg.TokenHash,
-		arg.UserID,
-	)
-	var i ApiToken
-	err := row.Scan(
-		&i.ID,
-		&i.ProjectID,
-		&i.Name,
-		&i.TokenHash,
-		&i.CreatedAt,
-		&i.RevokedAt,
-		&i.Kind,
-		&i.TokenPlaintext,
-	)
-	return i, err
-}
-
 const getPublicTokenForProjectForUser = `-- name: GetPublicTokenForProjectForUser :one
-SELECT t.id, t.project_id, t.name, t.token_hash, t.created_at, t.revoked_at, t.kind, t.token_plaintext
+
+SELECT t.id, t.project_id, t.name, t.token_hash, t.created_at, t.revoked_at, t.token_plaintext
 FROM api_tokens t
 JOIN projects p ON p.id = t.project_id
 JOIN team_memberships tm ON tm.team_id = p.team_id
 WHERE t.project_id = $1
   AND tm.user_id = $2
-  AND t.kind = 'public_ingest'
   AND t.revoked_at IS NULL
   AND p.deleted_at IS NULL
 LIMIT 1
@@ -75,11 +27,18 @@ type GetPublicTokenForProjectForUserParams struct {
 	UserID    string
 }
 
-// Returns the project's active public_ingest token (id, plaintext, hash).
-// Plaintext is intentionally fetched: this token is non-secret and the UI
-// displays it verbatim. pgx.ErrNoRows surfaces if the project isn't visible
-// to the viewer OR if it has no active public token (which would be a
-// bootstrap bug — every project should be created with one).
+// Public ingest token storage. Only one flavour left: the `mere_pub_…`
+// snippet token that lives in client HTML. token_plaintext is intentionally
+// persisted because the project page re-displays it on every visit; the
+// partial unique index api_tokens_one_active_per_project_idx (migration 0007)
+// enforces at most one active token per project so rotation = insert new +
+// revoke old in one tx.
+//
+// /v1/* + /mcp bearer auth has moved to oauth_access_tokens (migration 0006);
+// secret_api tokens were retired with the api_tokens.kind column.
+// Membership-gated read: only succeeds when the viewer is a member of the
+// project's team and the project is not soft-deleted. Plaintext is returned
+// because this token is public by design.
 func (q *Queries) GetPublicTokenForProjectForUser(ctx context.Context, arg GetPublicTokenForProjectForUserParams) (ApiToken, error) {
 	row := q.db.QueryRow(ctx, getPublicTokenForProjectForUser, arg.ProjectID, arg.UserID)
 	var i ApiToken
@@ -90,15 +49,14 @@ func (q *Queries) GetPublicTokenForProjectForUser(ctx context.Context, arg GetPu
 		&i.TokenHash,
 		&i.CreatedAt,
 		&i.RevokedAt,
-		&i.Kind,
 		&i.TokenPlaintext,
 	)
 	return i, err
 }
 
 const insertPublicAPIToken = `-- name: InsertPublicAPIToken :exec
-INSERT INTO api_tokens (id, project_id, name, token_hash, kind, token_plaintext)
-VALUES ($1, $2, $3, $4, 'public_ingest', $5)
+INSERT INTO api_tokens (id, project_id, name, token_hash, token_plaintext)
+VALUES ($1, $2, $3, $4, $5)
 `
 
 type InsertPublicAPITokenParams struct {
@@ -106,15 +64,13 @@ type InsertPublicAPITokenParams struct {
 	ProjectID      string
 	Name           string
 	TokenHash      string
-	TokenPlaintext *string
+	TokenPlaintext string
 }
 
 // Bootstraps the project's public_ingest token. Called from inside the
-// project-create transaction (auth.Service.CreateProjectWithPublicToken), so
+// project-create transaction (auth.Service.createProjectWithPublicToken), so
 // no membership EXISTS guard is needed — the project row was just inserted
-// in the same tx by a query that already enforced membership. The partial
-// unique index api_tokens_one_active_public_per_project_idx guarantees we
-// can't double-insert (would fail loudly, aborting the tx).
+// in the same tx by a query that already enforced membership.
 func (q *Queries) InsertPublicAPIToken(ctx context.Context, arg InsertPublicAPITokenParams) error {
 	_, err := q.db.Exec(ctx, insertPublicAPIToken,
 		arg.ID,
@@ -124,102 +80,4 @@ func (q *Queries) InsertPublicAPIToken(ctx context.Context, arg InsertPublicAPIT
 		arg.TokenPlaintext,
 	)
 	return err
-}
-
-const listTokensForProjectForUser = `-- name: ListTokensForProjectForUser :many
-
-SELECT t.id, t.project_id, t.name, t.token_hash, t.created_at, t.revoked_at, t.kind, t.token_plaintext
-FROM api_tokens t
-JOIN projects p ON p.id = t.project_id
-JOIN team_memberships tm ON tm.team_id = p.team_id
-WHERE t.project_id = $1
-  AND tm.user_id = $2
-  AND t.kind = 'secret_api'
-  AND t.revoked_at IS NULL
-  AND p.deleted_at IS NULL
-ORDER BY t.created_at ASC
-`
-
-type ListTokensForProjectForUserParams struct {
-	ProjectID string
-	UserID    string
-}
-
-// Token storage: two flavours sharing one table, distinguished by `kind`.
-//
-//	kind='public_ingest' (mere_pub_…)  — non-secret snippet token. token_hash
-//	   indexes the bearer lookup; token_plaintext is also persisted so the
-//	   project page can re-display it (the snippet needs to be copied many
-//	   times). One active row per project, enforced by a partial unique
-//	   index in migration 0005.
-//	kind='secret_api' (mere_pat_…)     — pre-existing read/MCP bearer. Only
-//	   sha256 hex is stored; token_plaintext is NULL. Plaintext is surfaced
-//	   to the user exactly once via render-on-POST (Issue 3).
-//
-// All mutating queries are membership-gated through the project's team_id.
-// ListTokensForProjectForUser returns only secret_api rows — the public token
-// has its own GetPublicTokenForProjectForUser endpoint because the UI shows
-// it in a different surface (always-visible vs. one-shot).
-// Active secret tokens only. Revoked tokens are retained in the row (for any
-// future audit view) but not shown by default. Public tokens are excluded
-// here; fetch them via GetPublicTokenForProjectForUser.
-func (q *Queries) ListTokensForProjectForUser(ctx context.Context, arg ListTokensForProjectForUserParams) ([]ApiToken, error) {
-	rows, err := q.db.Query(ctx, listTokensForProjectForUser, arg.ProjectID, arg.UserID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ApiToken{}
-	for rows.Next() {
-		var i ApiToken
-		if err := rows.Scan(
-			&i.ID,
-			&i.ProjectID,
-			&i.Name,
-			&i.TokenHash,
-			&i.CreatedAt,
-			&i.RevokedAt,
-			&i.Kind,
-			&i.TokenPlaintext,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const revokeAPITokenForUser = `-- name: RevokeAPITokenForUser :execrows
-UPDATE api_tokens
-SET revoked_at = NOW()
-WHERE api_tokens.id = $1
-  AND api_tokens.project_id = $2
-  AND api_tokens.kind = 'secret_api'
-  AND api_tokens.revoked_at IS NULL
-  AND api_tokens.project_id IN (
-      SELECT p.id FROM projects p
-      JOIN team_memberships tm ON tm.team_id = p.team_id
-      WHERE tm.user_id = $3 AND p.deleted_at IS NULL
-  )
-`
-
-type RevokeAPITokenForUserParams struct {
-	ID        string
-	ProjectID string
-	UserID    string
-}
-
-// Idempotent: WHERE revoked_at IS NULL means a second revoke returns
-// RowsAffected == 0, which the handler translates to 404. Scoped to
-// kind='secret_api' so a stray /revoke on a public token id is a no-op —
-// public-token rotation has its own (future) flow.
-func (q *Queries) RevokeAPITokenForUser(ctx context.Context, arg RevokeAPITokenForUserParams) (int64, error) {
-	result, err := q.db.Exec(ctx, revokeAPITokenForUser, arg.ID, arg.ProjectID, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
 }

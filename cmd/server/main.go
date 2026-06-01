@@ -24,6 +24,7 @@ import (
 	"github.com/jjdinho/mere-analytics/internal/clickhouse"
 	"github.com/jjdinho/mere-analytics/internal/config"
 	mmigrate "github.com/jjdinho/mere-analytics/internal/migrate"
+	"github.com/jjdinho/mere-analytics/internal/oauth"
 	"github.com/jjdinho/mere-analytics/internal/postgres"
 	"github.com/jjdinho/mere-analytics/internal/web"
 	"github.com/jjdinho/mere-analytics/migrations"
@@ -104,10 +105,15 @@ func run(logger *slog.Logger) error {
 
 	// --- HTTP ---
 	authSvc := auth.NewService(pgPool)
+	oauthSvc := oauth.NewService(pgPool)
+	oauthSvc.AccessTokenTTL = cfg.OAuthAccessTokenTTL
+	oauthSvc.AuthorizationCodeTTL = cfg.OAuthAuthorizationCodeTTL
 	srv := &http.Server{
 		Addr: fmt.Sprintf(":%d", cfg.Port),
 		Handler: web.Handler(web.Options{
 			AuthService:   authSvc,
+			OAuthService:  oauthSvc,
+			OAuthIssuer:   cfg.OAuthIssuerURL,
 			Logger:        logger,
 			SecureCookies: cfg.SecureCookies,
 		}),

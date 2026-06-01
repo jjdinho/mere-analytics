@@ -51,7 +51,7 @@ func TestConsumeInvite_InvalidToken(t *testing.T) {
 	_, _ = signupForTest(t, svc, "alice@example.com")
 	bobID, _ := signupForTest(t, svc, "bob@example.com")
 
-	_, err := svc.ConsumeInvite(context.Background(), bobID, "mere_pat_no_such_invite_hash_collision_unlikely_xyz")
+	_, err := svc.ConsumeInvite(context.Background(), bobID, "no-such-invite-hash-collision-unlikely-xyz")
 	if !errors.Is(err, auth.ErrInviteInvalid) {
 		t.Errorf("unknown invite: got %v want ErrInviteInvalid", err)
 	}
@@ -164,7 +164,7 @@ func TestSignupWithInvite_StrictOnInvalid(t *testing.T) {
 	_, err := svc.SignupWithInvite(ctx, auth.SignupRequest{
 		Email:    "newbie@example.com",
 		Password: "correct horse battery staple",
-	}, "mere_pat_garbage_no_such_invite_token_zzzz_xxx_yyy_ww")
+	}, "garbage-no-such-invite-token-zzzzzz-xxx-yyy-www")
 	if !errors.Is(err, auth.ErrInviteInvalid) {
 		t.Errorf("got %v want ErrInviteInvalid", err)
 	}

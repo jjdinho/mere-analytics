@@ -686,6 +686,8 @@ Shipped on branch `jjdinho/check-build-progress`. A logged-in user can view thei
 - Revoked-tokens audit view (TODOS.md item) — needs Step 5's bearer middleware to add `last_used_at` for the view to carry real signal.
 - Bearer-auth lookup function — owned by Step 5 (its first consumer is `/v1/ingest`).
 
+**Subsequent change (OAuth refactor):** Step 4's `mere_pat_…` secret-API bearer (and the render-on-POST issuance UX) was retired in favor of an OAuth 2.1 authorization-code + PKCE flow. `api_tokens` now only carries the public `mere_pub_…` snippet token; /v1/* + /mcp bearer auth goes through `oauth_access_tokens`. The historical record above is preserved verbatim; the live design is in `internal/oauth/` and migrations `0006_oauth` + `0007_drop_api_token_kind`.
+
 ---
 
 **Original spec for reference:**

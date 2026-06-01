@@ -44,6 +44,7 @@ func TestBoot_endToEnd(t *testing.T) {
 		"CLICKHOUSE_ADMIN_PASSWORD="+chCfg.ClickHouseAdminPassword,
 		"CLICKHOUSE_READONLY_USER="+chCfg.ClickHouseReadonlyUser,
 		"CLICKHOUSE_READONLY_PASSWORD="+chCfg.ClickHouseReadonlyPassword,
+		"OAUTH_ISSUER_URL=http://127.0.0.1:"+strconv.Itoa(port),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
