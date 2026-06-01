@@ -39,12 +39,9 @@ Self-hosters get the full product. No "cloud-only" features in this repo.
 │  ┌────────────────────┐    ┌───────────────────────────┐   │
 │  │   Public API       │    │   Web UI                  │   │
 │  │   (JSON)           │    │   (htmx + templ)          │   │
-│  │   - /v1/ingest     │    │   - signup / login        │   │
-│  │   - /v1/events     │    │   - projects + tokens     │   │
-│  │   - /v1/sessions   │    │   - event explorer        │   │
-│  │   - /v1/persons    │    │   - query playground      │   │
-│  │   - /v1/groups     │    │                           │   │
-│  │   - /v1/query      │    │                           │   │
+│  │   - /ingest/v1/*   │    │   - signup / login        │   │
+│  │   - /api/v1/       │    │                           │   │
+│  │     projects/*     │    │   - query playground      │   │
 │  │   - /mcp           │    │                           │   │
 │  └─────────┬──────────┘    └────────────┬──────────────┘   │
 │            │                             │                  │
@@ -60,10 +57,10 @@ Self-hosters get the full product. No "cloud-only" features in this repo.
        │  Postgres    │         │   ClickHouse     │
        │              │         │                  │
        │  users,      │         │  events_raw_v1   │
-       │  teams,      │         │   → events_v2    │
-       │  projects,   │         │  sessions_v1     │
-       │  api_tokens, │         │  persons_v1      │
-       │  oauth_*,    │         │  groups_v1       │
+       │  teams,      │         │  queryable via   │
+       │  projects,   │         │  /api/v1/...     │
+       │  api_tokens, │         │                  │
+       │  oauth_*,    │         │                  │
        │  sessions,   │         │                  │
        │  failed_evts │         │                  │
        └──────────────┘         └──────────────────┘
@@ -160,25 +157,21 @@ There is no operator CLI. Operator-only actions (password reset, project wipe, e
 | `teams` | a team owns one or more projects; every user has at least one (auto-created on signup) |
 | `team_memberships` | user ↔ team; no role distinction in v1 (all members equal) |
 | `projects` | scoped to a team; soft-deletable (`deleted_at` column) |
-| `api_tokens` | scoped to a project; public ingest token (`mere_pub_…`) for `/v1/ingest` |
+| `api_tokens` | scoped to a project; public ingest token (`mere_pub_…`) for `/ingest/v1/events` |
 | `oauth_clients` | OAuth client registry (RFC 7591 dynamic registration) |
 | `oauth_codes` | short-lived (10 min) PKCE authorization codes; one-shot |
-| `oauth_access_tokens` | 1-hour bearer tokens for `/v1/* + /mcp`, scoped to (user, project) |
+| `oauth_access_tokens` | 1-hour bearer tokens for `/api/v1/* + /mcp`, scoped to (user, project) |
 | `sessions` | web UI login sessions |
 | `team_invites` | one-shot invite links: `token`, `team_id`, `created_by`, `expires_at`, `consumed_at` |
 | `failed_events` | DLQ for ingest batches that failed to land in ClickHouse |
 
 ### ClickHouse (analytics)
 
-Versioned tables (suffix `_vN`), raw landing + materialized view pattern for events:
+Versioned tables (suffix `_vN`). The raw landing table is also the queryable surface; v1 deliberately does not add typed read models or derived endpoint-specific tables.
 
 | Table | Type | Notes |
 |---|---|---|
-| `events_raw_v1` | MergeTree | Landing table. All ingest writes here. |
-| `events_v2` | MergeTree via MV | Derived from `events_raw_v1`. The queryable surface. |
-| `sessions_v1` | MergeTree via MV | 30-min inactivity model. Keyed on `distinct_id`. |
-| `persons_v1` | MergeTree via MV | Thin rollup by `distinct_id`. |
-| `groups_v1` | MergeTree | Group properties, written directly. |
+| `events_raw_v1` | MergeTree | Landing table. All ingest writes here; project-scoped query reads it through `mere_readonly` with tenant filters. |
 
 All tables include `project_id` as a primary-key prefix component (cheap scoping at the part level).
 
@@ -186,8 +179,8 @@ All tables include `project_id` as a primary-key prefix component (cheap scoping
 
 Exactly two, defined in `config/deploy/clickhouse/users.xml` and provisioned by the ClickHouse container on first start:
 
-- **`mere_admin`** — full DDL/DML. Used for migrations, materialized-view creation, ingest writes.
-- **`mere_readonly`** — `SELECT` only. Used by the query executor for all read traffic (`/v1/query`, `/v1/events`, `/v1/sessions`, `/v1/persons`, `/v1/groups`, MCP read tools).
+- **`mere_admin`** — full DDL/DML. Used for migrations and ingest writes.
+- **`mere_readonly`** — `SELECT` only. Used by the query executor for all read traffic (`/api/v1/projects/:project_id/query`, `/api/v1/projects/:project_id/schema`, MCP read tools).
 
 The ClickHouse image's built-in `default` user remains restricted to `127.0.0.1` (inside the container only) — used only by the operator via the `clickhouse-console` Kamal alias, never by the app.
 
@@ -208,26 +201,22 @@ This buffers small inserts ClickHouse-side and flushes in larger batches, reduci
 
 ## Public API
 
-All endpoints are project-scoped via OAuth bearer tokens (issued by the in-process OAuth 2.1 server at `/oauth/*`). Cursor pagination, ClickHouse error passthrough, JSON in/out. `/v1/ingest` is the exception — it stays on the public `mere_pub_` snippet token in `api_tokens`, since the snippet lives in client HTML.
+The API has two planes. Public ingest lives under `/ingest/v1/*` and resolves the project from the public `mere_pub_` snippet token in `api_tokens`, since the snippet lives in client HTML. Private read/control endpoints live under `/api/v1/*`, use OAuth bearer tokens issued by the in-process OAuth 2.1 server at `/oauth/*`, and include the project ID in the URL.
 
-**Soft-deleted projects return `404 Not Found` on every `/v1/*` endpoint** — the API behaves exactly as if the project never existed. Underlying ClickHouse data is retained until an operator runs `kamal wipe-project`, so a deletion can be undone via direct SQL up to that point.
+**Soft-deleted projects return `404 Not Found` on every `/api/v1/projects/:project_id/*` endpoint** — the API behaves exactly as if the project never existed. Underlying ClickHouse data is retained until an operator runs `kamal wipe-project`, so a deletion can be undone via direct SQL up to that point. Public ingest tokens for soft-deleted projects return the same uniform auth failure as unknown/revoked tokens.
 
 ```
-POST  /v1/ingest          # batch events (1..N per request)
-GET   /v1/events          # list with filters
-GET   /v1/events/:id      # single event
-GET   /v1/sessions
-GET   /v1/sessions/:id
-GET   /v1/persons
-GET   /v1/persons/:distinct_id
-GET   /v1/groups
-POST  /v1/query           # SQL passthrough, runs through CTE-wrapping executor
-GET   /mcp                # MCP endpoint — tools wrap the read + query endpoints
+POST  /ingest/v1/events                    # batch events (1..N per request), project from public ingest token
+POST  /api/v1/projects/:project_id/query   # SQL passthrough, project-scoped by URL + OAuth grant
+GET   /api/v1/projects/:project_id/schema  # queryable table/column metadata for this project
+GET   /mcp                                 # MCP endpoint — tools wrap query + schema
 ```
 
 **Versioning policy:** `/v1` is **forever-stable**. Any breaking change ships at `/v2`. `/v1` and `/v2` coexist indefinitely. Additive changes (new fields, new endpoints) are allowed within `/v1`.
 
-The `/v1/query` body is `{"sql": "..."}`. The response is `{"columns": [...], "rows": [...], "stats": {...}}`. ClickHouse errors are returned with the original message — power users want them.
+The query body is `{"sql": "..."}`. The response is `{"columns": [...], "rows": [...], "stats": {...}}`. ClickHouse errors are returned with the original message — power users want them. The `:project_id` path parameter is authoritative for tenant scoping, and the OAuth grant must authorize that exact project; mismatch returns `404`.
+
+The schema response is a small JSON catalog of queryable tables and columns, e.g. `{"tables":[{"name":"events_raw_v1","columns":[...]}]}`. It is authenticated with the same OAuth bearer tokens as query and uses the same allowlist of queryable analytics tables.
 
 ## Ingest validation
 
@@ -245,17 +234,16 @@ Server-rendered (templ) + htmx for interactivity. Pages:
 - `/login`, `/logout` — there is no public signup route. The first user is created by the operator via `kamal create-user` (see "Operator actions"); subsequent users join via invite links. This means the deployer doesn't need to front the URL with an ACL to keep strangers out.
 - `/teams/:id` — team settings, member list, "Generate invite link" button. Clicking produces a one-shot URL (`/invites/:token`) that the inviter copies and shares out-of-band. Visiting the URL while logged-out renders an inline signup form (POST creates the account, consumes the invite, and logs the user in atomically); while logged-in, it adds the current user to the team. Each token is consumable once and has a 7-day TTL.
 - `/teams/:id/projects` — projects in this team; create / soft-delete.
-- `/projects/:id` — settings + the auto-provisioned public ingest token (always-visible copybox). `/v1/* + /mcp` bearers are not issued here; they come from the OAuth consent flow at `/oauth/authorize`.
-- `/projects/:id/events` — recent events table, filterable, paginated.
-- `/projects/:id/query` — SQL playground (textarea + Run button, results table).
+- `/projects/:id` — settings + the auto-provisioned public ingest token (always-visible copybox). `/api/v1/* + /mcp` bearers are not issued here; they come from the OAuth consent flow at `/oauth/authorize`.
+- `/projects/:id/query` — SQL playground (textarea + Run button, results table, schema sidebar).
 
 That's the whole UI. CodeMirror or Monaco gets dropped into the query page only if the textarea becomes a real bottleneck.
 
 ## Auth
 
 - **Web UI:** session cookie (HttpOnly, SameSite=Lax), backed by `sessions` table.
-- **`/v1/ingest`:** project-scoped public token (`mere_pub_…`) in `api_tokens`. Auto-provisioned at project create; non-secret by design (lives in client HTML).
-- **`/v1/* + /mcp`:** OAuth 2.1 access tokens (PKCE-only authorization-code flow). Stored hashed (sha256) in `oauth_access_tokens`; 1-hour TTL; one project per grant chosen at consent. Server lives in-process at `/oauth/{register,authorize,token}` with RFC 8414 discovery at `/.well-known/oauth-authorization-server`. No refresh tokens — re-authorize on expiry. Implementation in `internal/oauth/`.
+- **`/ingest/v1/events`:** project-scoped public token (`mere_pub_…`) in `api_tokens`. Auto-provisioned at project create; non-secret by design (lives in client HTML). The project is resolved from the token, never from a URL path parameter.
+- **`/api/v1/* + /mcp`:** OAuth 2.1 access tokens (PKCE-only authorization-code flow). Stored hashed (sha256) in `oauth_access_tokens`; 1-hour TTL; one project per grant chosen at consent. Server lives in-process at `/oauth/{register,authorize,token}` with RFC 8414 discovery at `/.well-known/oauth-authorization-server`. No refresh tokens — re-authorize on expiry. Implementation in `internal/oauth/`.
 - **No in-app password reset in v1.** Operators reset via the `kamal reset-password` alias (see "Operator actions"), which executes a SQL `UPDATE` against the `postgres` accessory using `pgcrypto`'s `crypt(..., gen_salt('bf', 10))`. Go's `bcrypt` and `pgcrypto`'s `bf` hashes are wire-compatible (both produce standard `$2a$` format), so the user logs in normally afterwards. The user is forced to change the password on next login.
 
 ## Multi-tenant isolation
@@ -267,11 +255,8 @@ Implementation:
 ```go
 ctx := clickhouse.Context(r.Context(), clickhouse.WithSettings(map[string]any{
     "additional_table_filters": fmt.Sprintf(
-        "{'analytics.events_v2': 'project_id = ''%s''', "+
-        " 'analytics.sessions_v1': 'project_id = ''%s''', "+
-        " 'analytics.persons_v1': 'project_id = ''%s''', "+
-        " 'analytics.groups_v1': 'project_id = ''%s'''}",
-        projectID, projectID, projectID, projectID,
+        "{'analytics.events_raw_v1': 'project_id = ''%s'''}",
+        projectID,
     ),
 }))
 rows, err := readonlyPool.QueryContext(ctx, userSQL)
@@ -284,18 +269,16 @@ Why this over CTE rewriting:
 - The filter applies to every reference to the table, including references inside views and joins the user might write.
 - Native to ClickHouse; the implementation is a single map literal, not a SQL transformer.
 
-Sanity-check tests for step 8:
-- Naive query: `SELECT count() FROM analytics.events_v2` → only this project's rows.
-- Cross-table join: `SELECT * FROM events_v2 e JOIN persons_v1 p ON e.distinct_id = p.distinct_id` → both filtered.
+Sanity-check tests for step 6:
+- Naive query: `SELECT count() FROM analytics.events_raw_v1` → only this project's rows.
+- Self-join: `SELECT * FROM events_raw_v1 a JOIN events_raw_v1 b ON a.distinct_id = b.distinct_id` → both references filtered.
 - Aliases / `FROM (SELECT ...)` subqueries → still filtered.
 - User attempts to bypass via `SETTINGS additional_table_filters = {...}` in their own SQL → ClickHouse merges; our filter still applies (verify).
 - Tables not in the map (e.g. `system.numbers`) → not filtered, but `mere_readonly` can't reach them anyway.
 
-**Server-side reads** (the typed `/v1/events`, `/v1/sessions`, etc. endpoints) bypass `additional_table_filters` — they build their own queries from typed inputs and add the `project_id` filter directly. `additional_table_filters` is specifically for the SQL passthrough surface (`/v1/query` and the MCP query tool).
-
 ## Ingest reliability
 
-Each `POST /v1/ingest` request:
+Each `POST /ingest/v1/events` request:
 
 1. Parses + validates the batch (per "Ingest validation" above).
 2. Pushes events onto an in-memory channel.
@@ -338,7 +321,7 @@ aliases:
   wipe-project: >
     accessory exec clickhouse -i
     "clickhouse-client --query
-     \"ALTER TABLE analytics.events_v2 DELETE WHERE project_id = '$PROJECT_ID'\""
+     \"ALTER TABLE analytics.events_raw_v1 DELETE WHERE project_id = '$PROJECT_ID'\""
 ```
 
 Operator invocation from their laptop (after `kamal config` is set up):
@@ -495,7 +478,7 @@ accessories:
 aliases:
   create-user:       accessory exec postgres -i "psql -U $POSTGRES_USER -d $POSTGRES_DB -v email=$EMAIL -v password=$INITIAL_PASSWORD -f /operator/create-user.sql"
   reset-password:    accessory exec postgres -i "psql -U $POSTGRES_USER -d $POSTGRES_DB -v email=$EMAIL -v password=$NEW_PASSWORD -f /operator/reset-password.sql"
-  wipe-project:      accessory exec clickhouse -i "clickhouse-client --query \"ALTER TABLE analytics.events_v2 DELETE WHERE project_id = '$PROJECT_ID'\""
+  wipe-project:      accessory exec clickhouse -i "clickhouse-client --query \"ALTER TABLE analytics.events_raw_v1 DELETE WHERE project_id = '$PROJECT_ID'\""
   db-console:        accessory exec postgres -i "psql -U $POSTGRES_USER -d $POSTGRES_DB"
   clickhouse-console: accessory exec clickhouse -i "clickhouse-client"
   console:           app exec --interactive --reuse "sh"
@@ -580,7 +563,7 @@ Shipped on branch `jjdinho/review-plan-next-step`. A user can sign up, log in, a
 - `sqlc` adopted as planned. `sqlc.yaml` at repo root; `internal/postgres/queries/*.sql` source; generated code in `internal/postgres/db/`. UUIDs kept as `string` (matches `idgen.New()`).
 - New PG migrations: `0002_sessions_csrf` (adds `csrf_token`), `0003_pgcrypto` (extension for the operator script).
 - `internal/auth/` — `password.go` (bcrypt cost 10, `ValidationError`, email normalize/validate), `csrf.go` (32-byte base64url tokens, constant-time compare), `context.go` (`Session` + CSRF context helpers), `service.go` (atomic Signup tx; Authenticate; session create/lookup/touch/destroy with 7-day sliding window, 30-day hard cap).
-- `internal/web/auth_middleware.go` — session-cookie middleware (sliding-expiry touch, refresh on each request), anonymous `mere_csrf` cookie fallback for pre-auth forms, CSRF enforcement that exempts `/v1/*` and `/mcp`.
+- `internal/web/auth_middleware.go` — session-cookie middleware (sliding-expiry touch, refresh on each request), anonymous `mere_csrf` cookie fallback for pre-auth forms, CSRF enforcement that exempts API routes and `/mcp`.
 - `internal/web/handlers.go` — `/signup`, `/login`, `/logout` handlers.
 - `internal/web/server.go` refactored to `web.Handler(Options{AuthService, Logger, SecureCookies})`.
 - Views: `layout.templ` (`@CSRFField()` helper + global `hx-headers`), `signup.templ`, `login.templ`, `home.templ`, refreshed `index.templ`, plus `internal/static/app.css`.
@@ -620,7 +603,7 @@ Shipped on branch `jjdinho/review-plan-next-step`. A user can sign up, log in, a
 
 **Decisions for this step:**
 - Session cookie: `mere_session`, HttpOnly, SameSite=Lax, PG-backed. Sliding expiry on each authenticated request; hard cap 30 days.
-- CSRF: per-session token in `sessions.csrf_token`; templ `@csrfField()` helper for forms; htmx layout sets `hx-headers='{"X-CSRF-Token":"..."}'` globally; middleware verifies on non-GET requests to web routes; `/v1/*` and `/mcp` exempt (Bearer auth, no cookie).
+- CSRF: per-session token in `sessions.csrf_token`; templ `@csrfField()` helper for forms; htmx layout sets `hx-headers='{"X-CSRF-Token":"..."}'` globally; middleware verifies on non-GET requests to web routes; API routes and `/mcp` exempt (Bearer/public-token auth, no cookie).
 - No public signup. The first user is created by the operator via `kamal create-user` (SQL script against the postgres accessory, same trust boundary as `kamal reset-password`); subsequent users join via invite links. Decisions log #4.
 - Bcrypt cost = 10 (Go default).
 - `reset-password.sql` raises on unknown email so kamal alias exits non-zero (don't silently report success on a typo'd email).
@@ -688,9 +671,9 @@ Shipped on branch `jjdinho/check-build-progress`. A logged-in user can view thei
 - Member removal from team (TODOS.md item) — closes the membership-lifecycle loop but no self-hoster has hit it yet.
 - API token expiry (TODOS.md item) — tokens are forever-valid until manually revoked; standard hygiene but not v1-blocking.
 - Revoked-tokens audit view (TODOS.md item) — needs Step 5's bearer middleware to add `last_used_at` for the view to carry real signal.
-- Bearer-auth lookup function — owned by Step 5 (its first consumer is `/v1/ingest`).
+- Bearer-auth lookup function — owned by Step 5 (its first consumer is public ingest).
 
-**Subsequent change (OAuth refactor):** Step 4's `mere_pat_…` secret-API bearer (and the render-on-POST issuance UX) was retired in favor of an OAuth 2.1 authorization-code + PKCE flow. `api_tokens` now only carries the public `mere_pub_…` snippet token; /v1/* + /mcp bearer auth goes through `oauth_access_tokens`. The historical record above is preserved verbatim; the live design is in `internal/oauth/` and migrations `0006_oauth` + `0007_drop_api_token_kind`.
+**Subsequent change (OAuth refactor):** Step 4's `mere_pat_…` secret-API bearer (and the render-on-POST issuance UX) was retired in favor of an OAuth 2.1 authorization-code + PKCE flow. `api_tokens` now only carries the public `mere_pub_…` snippet token; private API + `/mcp` bearer auth goes through `oauth_access_tokens`. The historical record above is preserved verbatim; the live design is in `internal/oauth/` and migrations `0006_oauth` + `0007_drop_api_token_kind`.
 
 ---
 
@@ -715,7 +698,7 @@ Shipped on branch `jjdinho/check-build-progress`. A logged-in user can view thei
 - All web UI data access goes through `viewer.X(ctx).ByID(id)`; missing membership = **404** not 403 (avoid confirming existence; protects against UUID enumeration).
 - Team invite consume: atomic `UPDATE team_invites SET consumed_at = NOW() WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > NOW() RETURNING ...`; check `RowsAffected == 1`. 7-day TTL.
 - Project soft-delete sets `deleted_at`; CH data persists. No UI restore (operator-recoverable via `UPDATE projects SET deleted_at = NULL`).
-- Bearer auth lookup against soft-deleted project: 404 on `/v1/*` (plan line 209); token itself isn't revoked, just inaccessible.
+- Bearer auth lookup against soft-deleted project: 404 on private project-scoped API endpoints; token itself isn't revoked, just inaccessible.
 
 **Error/rescue:**
 - Token "Create" double-click → `hx-disable-elt='this'` on every htmx button (templ helper).
@@ -724,14 +707,14 @@ Shipped on branch `jjdinho/check-build-progress`. A logged-in user can view thei
 
 **Tests:**
 - Unit: token format/length, sha256 round-trip, invite expiry math.
-- Integration: token-create flow returns plaintext exactly once; subsequent loads never expose plaintext; project soft-delete makes `/v1/*` return 404; invite consume-once race (two concurrent `UPDATE` → only one wins).
+- Integration: token-create flow returns plaintext exactly once; subsequent loads never expose plaintext; project soft-delete makes private project-scoped API endpoints return 404; invite consume-once race (two concurrent `UPDATE` → only one wins).
 - Security: cross-user authorization on every `/teams/:id` and `/projects/:id` route — user A cannot view user B's data.
 
 **Done when:** Create a team via UI, invite a second user, create a project, issue a token (visible once), revoke it, soft-delete the project.
 
 #### Post-step-4 follow-up: operator-bootstrapped first user [DONE]
 
-Shipped after step 4. Removes the public `/signup` route; the first user is created by the operator via a new `kamal create-user` alias, and logged-out invitees now create their account inline on `/invites/:token` instead of being routed to `/signup?invite=:t`. Motivation: the prior model ("open signup; deployer fronts the URL with an ACL") was awkward because the same hostname also serves `/v1/ingest`, which must stay reachable; path-based proxy rules are non-trivial and undercut the "easily deployed" promise. The new flow needs no proxy ACL — strangers can't create accounts because there's no public path to do so. See [decisions log #4](#decisions-log).
+Shipped after step 4. Removes the public `/signup` route; the first user is created by the operator via a new `kamal create-user` alias, and logged-out invitees now create their account inline on `/invites/:token` instead of being routed to `/signup?invite=:t`. Motivation: the prior model ("open signup; deployer fronts the URL with an ACL") was awkward because the same hostname also serves public ingest, which must stay reachable; path-based proxy rules are non-trivial and undercut the "easily deployed" promise. The new flow needs no proxy ACL — strangers can't create accounts because there's no public path to do so. See [decisions log #4](#decisions-log).
 
 - New: `scripts/operator/create-user.sql` (mirrors `reset-password.sql` conventions: pgcrypto bcrypt cost 10, GUC stashing for `:vars` inside `DO` blocks, `must_change_password=TRUE`, descriptive duplicate-email error). IDs are `gen_random_uuid()` (v4) — deliberate exception to the app's UUID v7 convention; no codepath orders by `id`.
 - Removed: `/signup` route, `getSignup`/`postSignup` handlers, `signup.templ`. `auth.Service.Signup` is retained as a test/seed primitive only (doc-commented as non-HTTP).
@@ -742,7 +725,7 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 
 ### Step 5 — Ingest
 
-**Goal:** `curl POST /v1/ingest` lands events in `events_raw_v1`. Survives transient CH outages via DLQ; surfaces both-down state loudly.
+**Goal:** `curl POST /ingest/v1/events` lands events in `events_raw_v1`. Survives transient CH outages via DLQ; surfaces both-down state loudly.
 
 **Implement per:** [Ingest validation](#ingest-validation) + [Ingest reliability](#ingest-reliability).
 
@@ -757,16 +740,16 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
   - `dlq.go` — drain goroutine; per-row backoff + `attempt_count` increment; quarantine after 20 attempts OR 24h age.
   - `state.go` — `atomic.Bool` fatal-state flag, `atomic.Bool` ingest-disabled flag.
 - `/internal/web/middleware.go`: `MaxBody(bytes int64)` factory; CORS middleware.
-- `/internal/web/handlers/ingest.go` — bearer auth, check fatal-state + ingest-disabled flags, body limit 10MB.
+- `/internal/web/ingest_handlers.go` — public ingest-token auth, check fatal-state + ingest-disabled flags, body limit 10MB.
 
 **Decisions for this step:**
-- **Cascade fatal-state flag.** When CH write AND `failed_events` insert both fail in the same flush, set a process-level flag. While set: `/v1/ingest` returns 503 + `Retry-After:30`; channel stops accepting new events; `/healthz` also returns 503. Flusher loops with backoff; first successful CH or PG write clears the flag. Honors "never silently drop" — producer keeps retrying, no 202 it doesn't deserve.
+- **Cascade fatal-state flag.** When CH write AND `failed_events` insert both fail in the same flush, set a process-level flag. While set: `/ingest/v1/events` returns 503 + `Retry-After:30`; channel stops accepting new events; `/healthz` also returns 503. Flusher loops with backoff; first successful CH or PG write clears the flag. Honors "never silently drop" — producer keeps retrying, no 202 it doesn't deserve.
 - **Poison-pill quarantine.** DLQ rows quarantine after 20 retry attempts OR 24h age. Drain skips quarantined rows. WARN log with row IDs on quarantine; recovery is a manual SQL UPDATE.
 - **DLQ depth observability.** Drain loop logs depth (INFO baseline, WARN >100, ERROR >10k). `/healthz` returns 503 when depth exceeds env-configured ceiling (default `DLQ_DEPTH_503_THRESHOLD=100000`).
-- **`INGEST_DISABLED` kill switch.** When env set, `/v1/ingest` returns 503 + `Retry-After:300`; `/v1/query` and web UI continue. Boot log + periodic WARN every 5 min while disabled; `/healthz` JSON body reports the flag. Operator workflow: `kamal env set INGEST_DISABLED=1 && kamal app restart`.
-- **Per-route `MaxBody`.** `/v1/ingest` = 10MB, `/v1/query` = 256KB, web form POSTs = 64KB. 413 on exceed.
-- **CORS** on `/v1/*` and `/mcp`: `Access-Control-Allow-Origin: *` default; `Allow-Methods: GET,POST,OPTIONS`; `Allow-Headers: Authorization,Content-Type`. Optional env `ALLOWED_ORIGINS=https://app.example.com,...` to restrict. Web UI routes set no CORS headers (same-origin enforced by browser).
-- **SIGTERM choreography.** (1) Close `/v1/ingest` (returns 503 for new requests); (2) HTTP server begins shutdown; (3) flusher gets up to env `INGEST_SHUTDOWN_GRACE_SEC` (default 10s) to drain channel to CH; (4) residual events written to `failed_events` as one batch; (5) exit. Coordinates with kamal-proxy `drain_timeout=30s` (set in step 10's `deploy.yml`).
+- **`INGEST_DISABLED` kill switch.** When env set, `/ingest/v1/events` returns 503 + `Retry-After:300`; query/schema and web UI continue. Boot log + periodic WARN every 5 min while disabled; `/healthz` JSON body reports the flag. Operator workflow: `kamal env set INGEST_DISABLED=1 && kamal app restart`.
+- **Per-route `MaxBody`.** `/ingest/v1/events` = 10MB, `/api/v1/projects/:project_id/query` = 256KB, web form POSTs = 64KB. 413 on exceed.
+- **CORS** on `/ingest/v1/*`, `/api/v1/*`, and `/mcp`: `Access-Control-Allow-Origin: *` default; `Allow-Methods: GET,POST,OPTIONS`; `Allow-Headers: Authorization,Content-Type`. Optional env `ALLOWED_ORIGINS=https://app.example.com,...` to restrict. Web UI routes set no CORS headers (same-origin enforced by browser).
+- **SIGTERM choreography.** (1) Close `/ingest/v1/events` (returns 503 for new requests); (2) HTTP server begins shutdown; (3) flusher gets up to env `INGEST_SHUTDOWN_GRACE_SEC` (default 10s) to drain channel to CH; (4) residual events written to `failed_events` as one batch; (5) exit. Coordinates with kamal-proxy `drain_timeout=30s` (set in step 8's `deploy.yml`).
 - **Concurrency primitives.** `sync.Once` for flusher startup; `chan struct{}` for shutdown signaling; `atomic.Bool` for fatal-state and ingest-disabled flags. Avoid mutexes on the hot path.
 - **Connection pool sizing.** pgx default is `max_conns = max(4, runtime.NumCPU()*4)`; clickhouse-go defaults to 10. Tune both during this step against realistic ingest concurrency.
 - **Edge cases:** Empty batch `{"events": []}` → 200 `{accepted: 0}`, not 400. DB error in bearer/project lookup → 503 generic (don't leak DB status).
@@ -776,102 +759,45 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 **Tests:**
 - Unit: validator (required fields, optional fields, extras stored verbatim, per-event errors in a batch).
 - Integration: ingest a batch → rows in `events_raw_v1`; bad project token → 401; soft-deleted project → 404; empty batch → 200; oversized body → 413.
-- Chaos: stop CH mid-test → batch lands in `failed_events`; restart CH → DLQ drain succeeds; stop both CH + PG → fatal-state flag → `/v1/ingest` 503 + `/healthz` 503; restart CH → flag clears; inject a row that always fails CH insert → quarantined after 20 attempts.
+- Chaos: stop CH mid-test → batch lands in `failed_events`; restart CH → DLQ drain succeeds; stop both CH + PG → fatal-state flag → `/ingest/v1/events` 503 + `/healthz` 503; restart CH → flag clears; inject a row that always fails CH insert → quarantined after 20 attempts.
 - Saturation: fill channel to `N+1` → 503 + `Retry-After`.
 - SIGTERM: send 1000 events, SIGTERM immediately → zero data loss (some in CH, rest in `failed_events`).
-- `INGEST_DISABLED`: set env → `/v1/ingest` 503; `/v1/query` unaffected.
+- `INGEST_DISABLED`: set env → `/ingest/v1/events` 503; query/schema unaffected.
 
 **Done when:** `curl` ingests events; events appear in `events_raw_v1`; CH outage survives via DLQ; both-down state surfaces via 503 + log; SIGTERM doesn't lose data.
 
 **Shipped (PR #12, engineering-review deltas):** The build above is the pre-review plan; the live implementation refined it. The historical record is preserved verbatim; what actually landed:
-- **Env renames.** `INGEST_CHANNEL_SIZE` → `INGEST_EVENT_BUFFER` (now an atomic in-flight *event* ceiling, not a channel-slot count; the channel is sized derived from it). `INGEST_SHUTDOWN_GRACE_SEC` → `INGEST_SHUTDOWN_GRACE` (a `time.Duration`, not an int-seconds). New knobs added: `INGEST_MAX_BODY_BYTES` (default 10 MiB) and `INGEST_DLQ_DRAIN_BATCH_LIMIT` (default 10). The Step 10 reference to `INGEST_SHUTDOWN_GRACE_SEC` (drain-timeout note) inherits the same rename.
+- **Env renames.** `INGEST_CHANNEL_SIZE` → `INGEST_EVENT_BUFFER` (now an atomic in-flight *event* ceiling, not a channel-slot count; the channel is sized derived from it). `INGEST_SHUTDOWN_GRACE_SEC` → `INGEST_SHUTDOWN_GRACE` (a `time.Duration`, not an int-seconds). New knobs added: `INGEST_MAX_BODY_BYTES` (default 10 MiB) and `INGEST_DLQ_DRAIN_BATCH_LIMIT` (default 10). The Step 8 reference to `INGEST_SHUTDOWN_GRACE_SEC` (drain-timeout note) inherits the same rename.
 - **Fatal-state `Retry-After`.** 5s, not 30s (disabled/kill-switch stays 300s; saturation stays 1s).
 - **Soft-deleted project → 401, not 404.** The ingest-token lookup excludes soft-deleted projects and collapses to the same uniform 401 as an unknown/revoked token, so project existence isn't leaked via status code.
 - **Infra error in token lookup → 500, not "503 generic".** A PG-down lookup is an infrastructure failure surfaced as 500 (distinct from the 503 backpressure used for disabled/fatal/saturation), so an outage doesn't read as a credential-stuffing signal. The 503-only-leaks-no-DB-status intent is preserved — 500 carries a generic body.
 - **`last_used_at` tie-in.** This PR also added `oauth_access_tokens.last_used_at`, stamped fire-and-forget by `RequireBearer` via a 60s-throttled UPDATE — satisfying the Step 4 forward-note (above) that the revoked-tokens / connected-apps work needs.
 
-### Step 6 — Events MV + read endpoints
+### Step 6 — Query API + schema
 
-**Goal:** `events_v2` MV is populated from `events_raw_v1`; `GET /v1/events` and the web event explorer return data scoped to the bearer-authed project.
+**Goal:** `POST /api/v1/projects/:project_id/query` runs arbitrary SQL as `mere_readonly`; tenant isolation is enforced via `additional_table_filters`; `GET /api/v1/projects/:project_id/schema` exposes the queryable catalog; web playground works.
 
-**Implement per:** [Data model](#data-model) + [Multi-tenant isolation](#multi-tenant-isolation).
-
-**Schema additions:**
-- New CH migration: `events_v2` table + materialized view from `events_raw_v1`.
-  - Columns: `(project_id UUID, event LowCardinality(String), distinct_id Nullable(String), timestamp DateTime64(3,'UTC'), session_id Nullable(String), properties String, extras String)` — same as `events_raw_v1` minus `received_at`.
-  - `properties` and `extras` stay as raw JSON `String`: lossless; user calls `JSONExtract*` in `/v1/query`.
-  - `ORDER BY (project_id, event, timestamp)` — read-optimized for "find all events of type X". Revisit with realistic data.
-  - `PARTITION BY toYYYYMM(timestamp)`.
-
-**New code:**
-- `/internal/events/scoped.go` — `events.Scoped(ctx, projectID)` builder exposing `.List(filter)`, `.ByID(id)`, `.Count(...)`, etc. Every method generates SQL with `WHERE project_id = $projectID` built in. Constructor attaches `clickhouse.WithSettings({max_execution_time=30, max_memory_usage=4GiB, max_result_rows=1000000})` so tenant filter and query budget ride together — no callsite can have one without the other.
-- `/internal/web/handlers/events.go` — `GET /v1/events`, `GET /v1/events/:id` (bearer-authed, calls `Scoped`); web UI event explorer page.
-
-**Decisions for this step:**
-- **`events_v2` schema as above** — raw `String` for `properties`/`extras` (lossless; conflicts with naïve "queryable" framing but user has `JSONExtract*` in `/v1/query`). MV's only job is read-optimized ORDER BY.
-- **`Scoped` builder pattern** is the compile-time-ish guarantee against cross-tenant leak. No method in the package exposes a query without the `project_id` predicate. Mirror this pattern in step 7 for sessions/persons/groups.
-- **Per-request CH limits via `WithSettings`** attached by `Scoped` constructor. Implementer cannot forget — there is no other way to obtain a query.
-- **Pagination:** cursor = `base64(timestamp + id)`; bad cursor → 400 `invalid_cursor`.
-- **Verify golang-migrate CH multi-statement.** The driver is already configured with `MultiStatementEnabled: true` (`internal/clickhouse/clickhouse.go:63`), but smoke-test with `CREATE TABLE` + `CREATE MATERIALIZED VIEW` in one migration file before relying on it. If it fails, split into two files.
-
-**Error/rescue:**
-- Bad cursor → 400.
-- Forgotten WHERE — structurally prevented by `Scoped`.
-- Query timeout / OOM — surfaced as 400 with CH error verbatim.
-
-**Tests:**
-- MV idempotency: boot twice, no errors, MV state identical.
-- `Scoped` enforcement: project A's `Scoped().List()` never returns project B's rows; constructor with empty `projectID` → runtime error.
-- Pagination round-trip.
-- Integration: ingest 1000 events into project A, 1000 into B; list with A's token returns exactly 1000.
-
-**Done when:** Ingest events; see them via `/v1/events` and in the explorer UI.
-
-### Step 7 — Sessions + persons + groups
-
-**Goal:** `sessions_v1`, `persons_v1`, `groups_v1` exist and back read endpoints.
-
-**Implement per:** [Data model](#data-model).
-
-**Schema additions:**
-- New CH migrations: `sessions_v1` (MV from `events_v2`, 30-min inactivity model), `persons_v1` (MV from `events_v2` keyed on `distinct_id`), `groups_v1` (MergeTree; direct writes from a forthcoming `POST /v1/groups` endpoint).
-- All carry `project_id` as PK prefix.
-
-**New code:**
-- `/internal/sessions/scoped.go`, `/internal/persons/scoped.go`, `/internal/groups/scoped.go` — `Scoped` builder per resource, mirroring step 6.
-- `/internal/web/handlers/` — `GET /v1/sessions`, `GET /v1/sessions/:id`, `GET /v1/persons`, `GET /v1/persons/:distinct_id`, `GET /v1/groups`.
-
-**Decisions for this step:**
-- Same `Scoped` pattern + same per-request CH limits as step 6.
-- Groups: `POST /v1/groups` for direct upserts (no MV); request shape decided during implementation.
-
-**Tests:**
-- MV idempotency per table.
-- `Scoped` enforcement per resource.
-- Session boundary: 30-min inactivity correctly splits one user's events into two sessions.
-
-**Done when:** Ingest events; see derived sessions/persons/groups data via API.
-
-### Step 8 — Query API
-
-**Goal:** `POST /v1/query` runs arbitrary SQL as `mere_readonly`; tenant isolation enforced via `additional_table_filters`; web playground works.
-
-**Implement per:** [Multi-tenant isolation](#multi-tenant-isolation).
+**Implement per:** [Public API](#public-api) + [Multi-tenant isolation](#multi-tenant-isolation).
 
 **Schema additions:** None.
 
 **New code:**
-- `/internal/query/executor.go` — accepts `{sql}`; attaches `additional_table_filters` for all analytics tables; attaches per-request CH settings (`max_execution_time=30s`, `max_memory_usage=4GiB`, `max_result_rows=1000000`); runs against `mere_readonly` pool; **streams** `{columns, rows, stats}` response (write JSON envelope incrementally; emit rows directly to `http.ResponseWriter` instead of buffering a `[]map` — a 1M-row buffered response is ~100MB in memory).
-- `/internal/web/handlers/query.go` — `POST /v1/query`; web UI playground page (textarea + Run button + results table).
+- `/internal/query/executor.go` — accepts `{sql}`; attaches `additional_table_filters` for the queryable analytics table allowlist (`analytics.events_raw_v1` today); attaches per-request CH settings (`max_execution_time=30s`, `max_memory_usage=4GiB`, `max_result_rows=1000000`); runs against `mere_readonly` pool; **streams** `{columns, rows, stats}` response (write JSON envelope incrementally; emit rows directly to `http.ResponseWriter` instead of buffering a `[]map` — a 1M-row buffered response is ~100MB in memory).
+- `/internal/query/schema.go` — returns the queryable catalog from the same allowlist used by the executor. It can read ClickHouse metadata with allowlisted `DESCRIBE TABLE` calls through `mere_readonly`, but it must not expose non-allowlisted databases/tables.
+- `/internal/web/query_handlers.go` — `POST /api/v1/projects/{project_id}/query` and `GET /api/v1/projects/{project_id}/schema`, bearer-authed with the OAuth middleware; path project must match the OAuth grant.
+- Web UI query playground page (textarea + Run button + results table + schema sidebar).
 
 **Decisions for this step:**
-- `additional_table_filters` is the isolation mechanism for `/v1/query` and the MCP query tool only — typed reads (steps 6-7) use `Scoped` builders instead. User SQL passes through unmodified; CH merges the filter at execution.
-- **Per-request limits via `WithSettings`** (same values as `Scoped`).
+- `additional_table_filters` is the isolation mechanism for `/api/v1/projects/:project_id/query` and the MCP query tool. User SQL passes through unmodified; ClickHouse merges the filter at execution.
+- **No typed read endpoints.** Do not build events, sessions, persons, or groups read endpoints; the supported read surface is project-scoped query plus schema.
+- **Project scoping contract.** Query/schema get `project_id` from the URL, then verify the OAuth access token authorizes that exact project. Unknown, soft-deleted, unauthorized, or token/path mismatch all return `404`.
+- **Per-request limits via `WithSettings`** live in the query executor.
 - **Response streaming** is required, not optional.
 - CH errors returned verbatim — `mere_readonly`'s grants already define the leak surface.
 - **Query handler MUST pass `r.Context()` to the CH driver** — verified in a unit test. Client disconnect → CH query KILLed.
-- **Single executor, two front doors.** `/v1/query` and the MCP query tool (step 9) MUST both call `internal/query.Executor` — same function, same pool, same `additional_table_filters` map, same per-request `WithSettings`. No SQL strings, CH driver calls, or settings construction live in `internal/web/handlers/query.go` or `internal/mcp/`; the handlers are thin adapters that translate transport (HTTP body ↔ MCP tool args) into an executor call. Same rule for typed reads: `internal/{events,sessions,persons,groups}` `Scoped` builders are the only path to the analytics tables. If a future "MCP shortcut" is tempting, the answer is to extend the executor, not duplicate it.
-- **Tenant-isolation contract test.** `tenant_isolation_test.go` ships in this step. A route-registry pattern enrolls every `/v1/*` route **and every MCP tool that reads analytics data** (query, events, sessions, persons, groups). The test seeds two projects (A, B) with distinct events, calls every enrolled entry point with A's token, and asserts no B-distinguishable string appears. New routes or tools either enroll or break the test. This is the single most-important test for the project.
+- **Single executor, two front doors.** `/api/v1/projects/:project_id/query` and the MCP query tool (step 7) MUST both call `internal/query.Executor` — same function, same pool, same `additional_table_filters` map, same per-request `WithSettings`. No SQL strings, CH driver calls, or settings construction live in `internal/web/query_handlers.go` or `internal/mcp/`; the handlers are thin adapters that translate transport (HTTP body ↔ MCP tool args) into an executor call.
+- **Single schema provider, two front doors.** `/api/v1/projects/:project_id/schema` and the MCP schema tool MUST both call `internal/query.Schema` so the table allowlist cannot drift.
+- **Tenant-isolation contract test.** `tenant_isolation_test.go` ships in this step. A route-registry pattern enrolls every read surface (`/api/v1/projects/:project_id/query`, `/api/v1/projects/:project_id/schema`, and later every MCP tool that reads analytics data). The test seeds two projects (A, B) with distinct events, calls every enrolled entry point with A's token, and asserts no B-distinguishable string appears. New read routes or tools either enroll or break the test. This is the single most-important test for the project.
 
 **Error/rescue:**
 - CH parse error → 400 with CH message verbatim.
@@ -880,21 +806,22 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 - Client disconnect → query cancellation propagates to CH.
 
 **Tests:**
-- **Isolation sanity checks** (plan lines 282–288):
-  - `SELECT count() FROM analytics.events_v2` returns only one project's rows.
-  - Cross-table join `SELECT * FROM events_v2 e JOIN persons_v1 p ON e.distinct_id = p.distinct_id` — both filtered.
-  - Subquery / alias `SELECT * FROM (SELECT * FROM events_v2)` — still filtered.
+- **Isolation sanity checks**:
+  - `SELECT count() FROM analytics.events_raw_v1` returns only one project's rows.
+  - Self-join `SELECT * FROM events_raw_v1 a JOIN events_raw_v1 b ON a.distinct_id = b.distinct_id` — both references filtered.
+  - Subquery / alias `SELECT * FROM (SELECT * FROM events_raw_v1)` — still filtered.
   - User attempts to override `SETTINGS additional_table_filters = {...}` — our filter still wins.
   - `system.*` tables unreachable to `mere_readonly`.
+- **Schema:** `/api/v1/projects/:project_id/schema` lists `events_raw_v1` columns and does not expose non-allowlisted tables.
 - **Limits:** 31s query → 400 timeout; 5GiB query → 400 memory.
 - **Cancellation:** client disconnect mid-query → CH `KILL QUERY`.
 - **Contract test** as described above.
 
-**Done when:** `/v1/query` runs SQL with tenant isolation; playground UI works; contract test green.
+**Done when:** `/api/v1/projects/:project_id/query` runs SQL with tenant isolation; `/api/v1/projects/:project_id/schema` lists the queryable catalog; playground UI works; contract test green.
 
-### Step 9 — MCP
+### Step 7 — MCP
 
-**Goal:** `/mcp` endpoint via `mark3labs/mcp-go`; tools wrap the read + query endpoints.
+**Goal:** `/mcp` endpoint via `mark3labs/mcp-go`; tools wrap query + schema.
 
 **Implement per:** [Public API](#public-api).
 
@@ -902,14 +829,14 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 
 **New code:**
 - `/internal/mcp/adapter.go` — `RegisterTool(name, handler)` helper wraps every tool handler with `defer/recover`, translates panics to JSON-RPC `internal_error`, logs at ERROR with stack trace. Mounted via the same mux as web routes so `recoverMiddleware` is a second line of defense.
-- `/internal/mcp/tools/` — tool definitions that **call the same `internal/query` executor and `internal/{events,sessions,persons,groups}` `Scoped` builders as the HTTP handlers**. Tool handlers are pure adapters: parse the MCP tool args, call the shared service, marshal the result into the MCP response. No SQL, no CH driver calls, no `additional_table_filters` map construction lives in this package — if it does, the isolation contract has two sources of truth and will drift.
-- `/internal/web/handlers/mcp.go` — mounts the MCP handler at `/mcp`; bearer auth identical to `/v1/*`.
+- `/internal/mcp/tools/` — query and schema tool definitions that **call the same `internal/query` executor and schema provider as the HTTP handlers**. Tool handlers are pure adapters: parse the MCP tool args, call the shared service, marshal the result into the MCP response. No SQL, no CH driver calls, no `additional_table_filters` map construction lives in this package — if it does, the isolation contract has two sources of truth and will drift.
+- `/internal/web/handlers/mcp.go` — mounts the MCP handler at `/mcp`; bearer auth identical to `/api/v1/*`.
 
 **Decisions for this step:**
-- **Single executor, two front doors** (see step 8). MCP tools and `/v1/*` handlers share `internal/query` and the typed `Scoped` builders. Anything tenant-sensitive (filters, per-request CH limits, pool selection) lives in those packages and only those packages.
+- **Single executor/schema provider, two front doors** (see step 6). MCP tools and `/api/v1/*` handlers share `internal/query`. Anything tenant-sensitive (filters, per-request CH limits, pool selection, table allowlists) lives in that package and only that package.
 - **Double-recovery** on panics — library bug cannot escape.
 - `mark3labs/mcp-go` pinned to a specific **commit SHA** in `go.mod`, not a moving tag.
-- CORS on `/mcp` matches `/v1/*`.
+- CORS on `/mcp` matches `/api/v1/*`.
 
 **Error/rescue:**
 - Panic in tool handler → JSON-RPC `internal_error` + ERROR log; not a process crash.
@@ -919,11 +846,11 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 - Inject a panic in a tool → JSON-RPC error, process survives, log line present.
 - Malformed JSON-RPC payload → proper JSON-RPC error.
 - Bearer auth applied to `/mcp`.
-- **MCP tools enrolled in the step-8 tenant-isolation contract test.** A/B-seeded run with A's token through every read/query tool returns no B-distinguishable row.
+- **MCP tools enrolled in the step-6 tenant-isolation contract test.** A/B-seeded run with A's token through every query/schema tool returns no B-distinguishable row.
 
-**Done when:** A Claude MCP client can connect and run a read tool against a project.
+**Done when:** A Claude MCP client can connect and run query + schema tools against a project.
 
-### Step 10 — Deploy: end-to-end VPS provisioning
+### Step 8 — Deploy: end-to-end VPS provisioning
 
 **Goal:** A stranger can `kamal setup` on a fresh Hetzner VPS and have a working analytics server in under 10 minutes.
 
@@ -941,18 +868,18 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
   - **(A)** `users.xml` defines admin only; app remains the sole source of truth for readonly. **Default recommendation.** Reason: avoids two sources of truth (sneaky failure mode); keeps drift correction; keeps rotation convergence.
   - (B) `users.xml` defines both; app keeps provisioning as belt-and-suspenders. Risk: divergence in botched rotation.
   - (C) `users.xml` defines both; remove app-side provisioning. Cleanest separation but gives up drift correction.
-- **Broken-migration recovery docs.** Add a "Recovering from a broken migration" section to `docs/self-host.md` (written in step 12) with explicit `kamal db-console` / `kamal clickhouse-console` recipes for: (1) `migrate force N`, (2) drop / recreate a broken MV, (3) writing the fix-forward migration. Convention is fix-forward, not rollback.
+- **Broken-migration recovery docs.** Add a "Recovering from a broken migration" section to `docs/self-host.md` (written in step 10) with explicit `kamal db-console` / `kamal clickhouse-console` recipes for: (1) `migrate force N`, (2) drop / recreate a broken MV, (3) writing the fix-forward migration. Convention is fix-forward, not rollback.
 - **Build-time version stamp.** Inject `git describe --tags` via ld-flag (`-X main.Version=...`) in the Dockerfile; `main.go` logs `version=...` on boot; `/healthz` JSON body returns it. Answers "what's deployed right now?" from `kamal logs`.
 - **kamal-proxy `drain_timeout=30s`** in `deploy.yml` (must exceed app's `INGEST_SHUTDOWN_GRACE_SEC` from step 5).
 - **Operator alias surface:** `reset-password`, `wipe-project`, `db-console`, `clickhouse-console`, plus kamal-default `console` and `logs`. No additional aliases in v1.
 
 **Tests:**
-- Manual on a fresh Hetzner VPS: `kamal setup` from zero → TLS → `POST /v1/ingest` → `GET /v1/events` → `kamal deploy` an upgrade with zero downtime → verify ingest + query unaffected during the swap.
+- Manual on a fresh Hetzner VPS: `kamal setup` from zero → TLS → `POST /ingest/v1/events` → `POST /api/v1/projects/:project_id/query` + `GET /api/v1/projects/:project_id/schema` → `kamal deploy` an upgrade with zero downtime → verify ingest + query unaffected during the swap.
 - Migration auto-run on container restart: deploy with a no-op new migration; observe it applied on boot.
 
 **Done when:** A fresh VPS reaches working state via `kamal setup` in under 10 min.
 
-### Step 11 — CI image publishing
+### Step 9 — CI image publishing
 
 **Goal:** `ghcr.io/<org>/mere:vX.Y.Z` exists shortly after `git tag v0.1.0 && git push --tags`.
 
@@ -968,13 +895,13 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 
 **Done when:** A tagged release produces a public image within a few minutes.
 
-### Step 12 — Docs + self-host guide
+### Step 10 — Docs + self-host guide
 
 **Goal:** Someone else can stand it up from scratch without help.
 
 **Files:**
-- `docs/api.md` — public API reference (every `/v1/*` endpoint, MCP tools, error shapes).
-- `docs/self-host.md` — the "from zero" workflow above, expanded; includes the broken-migration recovery recipes (from step 10's decision); includes the backward-compatible-migration convention (see TODOS.md); includes example `pg_dump` + `clickhouse-backup` scripts for non-Hetzner deployers.
+- `docs/api.md` — public API reference (every `/ingest/v1/*` and `/api/v1/*` endpoint, MCP tools, error shapes).
+- `docs/self-host.md` — the "from zero" workflow above, expanded; includes the broken-migration recovery recipes (from step 8's decision); includes the backward-compatible-migration convention (see TODOS.md); includes example `pg_dump` + `clickhouse-backup` scripts for non-Hetzner deployers.
 - `README.md` — pitch, quickstart, link to `self-host.md`.
 - `docs/architecture.md` — written once the design has stabilized through implementation.
 
@@ -998,7 +925,7 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 | 8 | `/v1` versioning? | **Forever-stable.** Breaking changes go to `/v2`. Additive changes within `/v1` allowed. |
 | 9 | ClickHouse password into `users.xml`? | **Precompute SHA-256 in `.kamal/secrets`** alongside the plaintext; templated `users.xml` references `${CLICKHOUSE_*_PASSWORD_SHA256}`. Plaintext never hits the CH server. |
 | 10 | Migration timing on deploy? | **App auto-runs on container start** (PG then CH). Failed migration aborts startup; kamal-proxy keeps routing to prior version. |
-| 11 | Soft-deleted project visibility on `/v1/*`? | **404 immediately** on all endpoints. Underlying CH data is retained until `kamal wipe-project` runs. |
+| 11 | Soft-deleted project visibility on private API endpoints? | **404 immediately** on `/api/v1/projects/:project_id/*`. Underlying CH data is retained until `kamal wipe-project` runs. |
 | 12 | `failed_events` retention after drain? | **Delete on successful drain.** Pure retry buffer, not an audit trail. |
 | 13 | Multi-tenant query isolation? | **ClickHouse `additional_table_filters` setting** attached per request. User SQL is unmodified; CH applies the filter at execution. No SQL parser to maintain. |
 | 14 | Team invite flow? | **Invite-by-link.** One-shot token, 7-day TTL, generated from team settings. Inviter shares the URL out-of-band; recipient signs up (or logs in) and joins. |
