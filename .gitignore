@@ -23,6 +23,10 @@ coverage.txt
 .env.local
 .kamal/secrets
 
+# Operator-local Kamal config (copied from config/deploy.example.yml and
+# filled in per deployment; never committed). The template is committed.
+/config/deploy.yml
+
 # Docker volumes (in case anyone runs compose with default volume paths)
 /data/
 

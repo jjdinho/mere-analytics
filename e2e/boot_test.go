@@ -86,6 +86,11 @@ func TestBoot_endToEnd(t *testing.T) {
 	if !strings.Contains(body, `"status":"ok"`) {
 		t.Errorf("/healthz body: got %q want JSON containing \"status\":\"ok\"", body)
 	}
+	// Build-time version stamp (step 8). buildServer compiles with a plain
+	// `go build` (no -ldflags), so main.Version keeps its "dev" default.
+	if !strings.Contains(body, `"version":"dev"`) {
+		t.Errorf("/healthz body: got %q want JSON containing \"version\":\"dev\"", body)
+	}
 
 	// Index page.
 	body = mustGetBody(t, fmt.Sprintf("http://127.0.0.1:%d/", port))

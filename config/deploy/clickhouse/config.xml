@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<!--
+  Production ClickHouse server overrides. Kamal mounts this at
+  /etc/clickhouse-server/config.d/config.xml (see config/deploy.example.yml),
+  where it merges over the image's stock config.
+
+  Two concerns:
+    1. async_insert defaults on the `default` profile — buffer small inserts
+       CH-side and flush in larger batches, cutting part count and write
+       amplification. mere_admin uses the default profile, so ingest writes
+       inherit this. wait_for_async_insert=1 keeps acknowledgments tied to
+       durable flushes, which lets the Go DLQ path see write failures.
+    2. TTLs on the system log tables so a long-lived self-host deploy doesn't
+       grow them without bound.
+
+  We deliberately do NOT set <listen_host> here: the official image already
+  ships config.d/docker_related_config.xml setting it to "::", which is how the
+  app reaches CH over the Docker network.
+-->
+<clickhouse>
+    <profiles>
+        <default>
+            <async_insert>1</async_insert>
+            <wait_for_async_insert>1</wait_for_async_insert>
+            <async_insert_busy_timeout_ms>1000</async_insert_busy_timeout_ms>
+            <async_insert_max_data_size>10485760</async_insert_max_data_size>
+        </default>
+    </profiles>
+
+    <!-- Keep ~30 days of system telemetry; older rows are dropped by a MergeTree TTL. -->
+    <query_log>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </query_log>
+    <query_thread_log>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </query_thread_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </part_log>
+    <trace_log>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </trace_log>
+    <metric_log>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </metric_log>
+    <asynchronous_metric_log>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+</clickhouse>

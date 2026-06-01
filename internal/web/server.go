@@ -37,6 +37,12 @@ type Options struct {
 	Logger        *slog.Logger
 	SecureCookies bool
 
+	// Version is the build-time version stamp (git describe), injected into
+	// cmd/server via -ldflags and surfaced in the /healthz body so operators
+	// can confirm what's deployed from `kamal logs` / a health probe. Empty in
+	// most tests; "dev" for un-stamped local builds.
+	Version string
+
 	// IngestService + the three following knobs wire POST /v1/ingest. Nil
 	// IngestService is supported so degenerate test scenarios that build a
 	// handler without a CH pool still work — /v1/ingest is just absent.
@@ -174,6 +180,7 @@ func Handler(opts Options) http.Handler {
 // without grepping logs. depth is the in-process DLQ gauge.
 type healthzPayload struct {
 	Status         string `json:"status"`
+	Version        string `json:"version"`
 	IngestDisabled bool   `json:"ingest_disabled"`
 	DLQDepth       int64  `json:"dlq_depth"`
 }
@@ -205,6 +212,7 @@ func healthzHandler(opts Options) http.HandlerFunc {
 		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(healthzPayload{
 			Status:         status,
+			Version:        opts.Version,
 			IngestDisabled: disabled,
 			DLQDepth:       depth,
 		})

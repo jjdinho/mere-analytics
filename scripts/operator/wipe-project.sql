@@ -1,0 +1,14 @@
+-- Permanently deletes a (soft-deleted) project's events from ClickHouse.
+-- Invoked from `kamal wipe-project` (defined in config/deploy.example.yml):
+--
+--   PROJECT_ID=01HX... kamal wipe-project
+--
+-- The alias passes the id as a typed query parameter
+-- (clickhouse-client --param_project_id=...), so it binds as a real UUID rather
+-- than being interpolated into the SQL text — no quoting/injection surface.
+--
+-- This is the irreversible counterpart to the app's soft delete (decision #11):
+-- soft delete hides a project from the API immediately; the underlying CH rows
+-- live on until an operator runs this. The mutation is asynchronous — CH
+-- schedules it and returns; rows disappear once the mutation completes.
+ALTER TABLE analytics.events_raw_v1 DELETE WHERE project_id = {project_id:UUID};
