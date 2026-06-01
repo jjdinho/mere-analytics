@@ -23,6 +23,7 @@ import (
 	"github.com/jjdinho/mere-analytics/internal/clickhouse"
 	"github.com/jjdinho/mere-analytics/internal/config"
 	"github.com/jjdinho/mere-analytics/internal/ingest"
+	"github.com/jjdinho/mere-analytics/internal/mcp"
 	mmigrate "github.com/jjdinho/mere-analytics/internal/migrate"
 	"github.com/jjdinho/mere-analytics/internal/oauth"
 	"github.com/jjdinho/mere-analytics/internal/postgres"
@@ -123,6 +124,12 @@ func run(logger *slog.Logger) error {
 	oauthSvc := oauth.NewService(pgPool)
 	oauthSvc.AccessTokenTTL = cfg.OAuthAccessTokenTTL
 	oauthSvc.AuthorizationCodeTTL = cfg.OAuthAuthorizationCodeTTL
+	mcpHandler := mcp.NewHTTPHandler(mcp.Deps{
+		AuthService: authSvc,
+		Executor:    queryExec,
+		Schema:      querySchema,
+		Logger:      logger,
+	})
 	srv := &http.Server{
 		Addr: fmt.Sprintf(":%d", cfg.Port),
 		Handler: web.Handler(web.Options{
@@ -138,6 +145,7 @@ func run(logger *slog.Logger) error {
 			QueryExecutor:        queryExec,
 			QuerySchema:          querySchema,
 			QueryMaxBodyBytes:    cfg.QueryMaxBodyBytes,
+			MCPHandler:           mcpHandler,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

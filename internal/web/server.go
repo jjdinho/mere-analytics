@@ -7,9 +7,8 @@
 // create-user) and subsequent users join via invite links rendered on
 // /invites/:token.
 //
-// /oauth/* implements a PKCE-only OAuth 2.1 server for /mcp + /v1/query
-// (handlers land in later PRs). /v1/whoami exists today as the bearer
-// middleware's production smoke surface.
+// /oauth/* implements a PKCE-only OAuth 2.1 server for /mcp + /api/v1/*.
+// /v1/whoami exists as the bearer middleware's production smoke surface.
 package web
 
 import (
@@ -49,6 +48,12 @@ type Options struct {
 	QueryExecutor     *query.Executor
 	QuerySchema       *query.SchemaProvider
 	QueryMaxBodyBytes int64
+
+	// MCPHandler is the Streamable HTTP transport for the /mcp endpoint
+	// (internal/mcp.NewHTTPHandler). It mounts behind the same RequireBearer
+	// + CORS middleware as /api/v1/*. Nil leaves /mcp unmounted — supported
+	// for degenerate test scenarios built without a CH pool.
+	MCPHandler http.Handler
 }
 
 // Handler builds the application's root http.Handler.
@@ -117,12 +122,21 @@ func Handler(opts Options) http.Handler {
 		mux.Handle("GET /oauth/authorize", getOAuthAuthorize(opts.AuthService, opts.OAuthService, logger))
 		mux.Handle("POST /oauth/authorize", auth(postOAuthAuthorize(opts.AuthService, opts.OAuthService, logger)))
 
-		// Bearer-protected production endpoint. Future /v1/query and /mcp
-		// mount with the same RequireBearer pattern.
+		// Bearer-protected production endpoints. /api/v1/* and /mcp share the
+		// same RequireBearer + CORS middleware so the auth + cross-origin
+		// surface is identical across both front doors.
 		bearer := RequireBearer(opts.OAuthService, logger)
+		cors := CORS(opts.AllowedOrigins)
 		mux.Handle("GET /v1/whoami", bearer(getWhoami()))
+
+		// MCP: one endpoint, all methods (the Streamable HTTP transport
+		// handles POST/GET/DELETE). CORS is outermost so a browser preflight
+		// is answered before bearer auth rejects the credential-less OPTIONS.
+		if opts.MCPHandler != nil {
+			mux.Handle("/mcp", cors(bearer(MaxBody(opts.QueryMaxBodyBytes)(opts.MCPHandler))))
+		}
+
 		if opts.QueryExecutor != nil && opts.QuerySchema != nil {
-			cors := CORS(opts.AllowedOrigins)
 			queryChain := cors(bearer(MaxBody(opts.QueryMaxBodyBytes)(postAPIProjectQuery(opts.AuthService, opts.QueryExecutor, logger))))
 			schemaChain := cors(bearer(getAPIProjectSchema(opts.AuthService, opts.QuerySchema, logger)))
 			mux.Handle("POST /api/v1/projects/{project_id}/query", queryChain)
