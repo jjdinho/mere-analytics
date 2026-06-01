@@ -6,6 +6,10 @@
 // created by the operator via scripts/operator/create-user.sql (kamal
 // create-user) and subsequent users join via invite links rendered on
 // /invites/:token.
+//
+// /oauth/* implements a PKCE-only OAuth 2.1 server for /mcp + /v1/query
+// (handlers land in later PRs). /v1/whoami exists today as the bearer
+// middleware's production smoke surface.
 package web
 
 import (
@@ -13,14 +17,21 @@ import (
 	"net/http"
 
 	"github.com/jjdinho/mere-analytics/internal/auth"
+	"github.com/jjdinho/mere-analytics/internal/oauth"
 	"github.com/jjdinho/mere-analytics/internal/static"
 )
 
 // Options bundles the dependencies needed to build the HTTP handler.
 // SecureCookies enables the Secure flag on session/csrf cookies — disabled
 // in dev (plaintext http on localhost) and enabled in production via env.
+//
+// OAuthService and OAuthIssuer are required to wire the OAuth routes; they
+// may be nil/empty in degenerate test scenarios that build a handler without
+// a database. The auth-only path keeps working in that case.
 type Options struct {
 	AuthService   *auth.Service
+	OAuthService  *oauth.Service
+	OAuthIssuer   string
 	Logger        *slog.Logger
 	SecureCookies bool
 }
@@ -62,20 +73,35 @@ func Handler(opts Options) http.Handler {
 		mux.Handle("GET /invites/{token}", getInvite(opts.AuthService, logger))
 		mux.Handle("POST /invites/{token}", postInvite(opts.AuthService, logger, opts.SecureCookies))
 
-		// Teams + projects + tokens — all require an authenticated session.
+		// Teams + projects — all require an authenticated session.
 		mux.Handle("GET /teams/{id}", auth(getTeam(logger)))
 		mux.Handle("POST /teams/{id}/invites", auth(postTeamInvites(logger)))
 		mux.Handle("POST /teams/{id}/projects", auth(postTeamProjects(logger)))
 
 		mux.Handle("GET /projects/{id}", auth(getProject(logger)))
 		mux.Handle("POST /projects/{id}/delete", auth(postProjectDelete(logger)))
-		mux.Handle("POST /projects/{id}/tokens", auth(postProjectTokens(logger)))
-		mux.Handle("POST /projects/{id}/tokens/{tid}/revoke", auth(postProjectTokenRevoke(logger)))
 
 		// Account / password change. The must_change_password gate inside
 		// authMiddleware redirects flagged users here from everywhere else.
 		mux.Handle("GET /account/password", auth(getAccountPassword()))
 		mux.Handle("POST /account/password", auth(postAccountPassword(opts.AuthService, logger)))
+	}
+
+	// OAuth 2.1 + bearer-protected v1 routes.
+	if opts.OAuthService != nil && opts.AuthService != nil {
+		auth := requireSession()
+		mux.Handle("GET /.well-known/oauth-authorization-server", getOAuthMetadata(opts.OAuthIssuer))
+		mux.Handle("POST /oauth/register", postOAuthRegister(opts.OAuthService, logger))
+		mux.Handle("POST /oauth/token", postOAuthToken(opts.OAuthService, logger))
+		// GET /oauth/authorize must handle the unauthenticated case itself
+		// (redirect to /login?next=…), so it is NOT wrapped in requireSession.
+		mux.Handle("GET /oauth/authorize", getOAuthAuthorize(opts.AuthService, opts.OAuthService, logger))
+		mux.Handle("POST /oauth/authorize", auth(postOAuthAuthorize(opts.AuthService, opts.OAuthService, logger)))
+
+		// Bearer-protected production endpoint. Future /v1/query and /mcp
+		// mount with the same RequireBearer pattern.
+		bearer := RequireBearer(opts.OAuthService, logger)
+		mux.Handle("GET /v1/whoami", bearer(getWhoami()))
 	}
 
 	var chain http.Handler = mux

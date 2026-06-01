@@ -15,8 +15,41 @@ type ApiToken struct {
 	TokenHash      string
 	CreatedAt      pgtype.Timestamptz
 	RevokedAt      pgtype.Timestamptz
-	Kind           string
-	TokenPlaintext *string
+	TokenPlaintext string
+}
+
+type OauthAccessToken struct {
+	ID        string
+	TokenHash string
+	ClientID  string
+	UserID    string
+	ProjectID string
+	Scope     string
+	ExpiresAt pgtype.Timestamptz
+	RevokedAt pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
+type OauthClient struct {
+	ID           string
+	Name         string
+	RedirectUris []string
+	CreatedAt    pgtype.Timestamptz
+}
+
+type OauthCode struct {
+	ID                  string
+	CodeHash            string
+	ClientID            string
+	UserID              string
+	ProjectID           string
+	RedirectUri         string
+	Scope               string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	ExpiresAt           pgtype.Timestamptz
+	UsedAt              pgtype.Timestamptz
+	CreatedAt           pgtype.Timestamptz
 }
 
 type Project struct {

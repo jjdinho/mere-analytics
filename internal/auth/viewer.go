@@ -224,6 +224,11 @@ func (c *ProjectsChain) SoftDelete(projectID string) error {
 // ──────────────────────────────────────────────────────────────────────
 // Tokens
 // ──────────────────────────────────────────────────────────────────────
+//
+// Only the public_ingest snippet token has a viewer surface — it's
+// auto-provisioned at project create and re-displayed on every visit. The
+// secret_api flavour is gone; /v1/* + /mcp bearer auth is served by OAuth
+// access tokens (package internal/oauth).
 
 type TokensChain struct {
 	v   *Viewer
@@ -234,28 +239,11 @@ func (v *Viewer) Tokens(ctx context.Context) *TokensChain {
 	return &TokensChain{v: v, ctx: ctx}
 }
 
-// ListForProject returns active secret_api tokens for the project. The
-// public_ingest token has its own surface (PublicForProject) because the UI
-// displays it differently. Empty slice for "no tokens"; ErrNotVisible is NOT
-// returned here because handlers always check project visibility via
-// Projects.ByID first.
-func (c *TokensChain) ListForProject(projectID string) ([]db.ApiToken, error) {
-	rows, err := c.v.queries().ListTokensForProjectForUser(c.ctx, db.ListTokensForProjectForUserParams{
-		ProjectID: projectID,
-		UserID:    c.v.userID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("viewer tokens list: %w", err)
-	}
-	return rows, nil
-}
-
 // PublicForProject returns the plaintext public_ingest token for the
 // project. Every project is bootstrapped with one at create time, so a
-// missing row is a hard bug rather than a user-facing 404: we return an
-// error that the handler logs and converts to 500. Callers always pre-check
-// project visibility via Projects.ByID, so the "viewer not in team" path
-// can't reach here.
+// missing row is a hard bug rather than a user-facing 404. Callers always
+// pre-check project visibility via Projects.ByID, so the "viewer not in
+// team" path can't reach here.
 func (c *TokensChain) PublicForProject(projectID string) (string, error) {
 	row, err := c.v.queries().GetPublicTokenForProjectForUser(c.ctx, db.GetPublicTokenForProjectForUserParams{
 		ProjectID: projectID,
@@ -264,60 +252,7 @@ func (c *TokensChain) PublicForProject(projectID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("viewer tokens public: %w", err)
 	}
-	if row.TokenPlaintext == nil {
-		return "", fmt.Errorf("viewer tokens public: row has NULL plaintext (project %s)", projectID)
-	}
-	return *row.TokenPlaintext, nil
-}
-
-// CreateTokenResult is what Create returns: the plaintext token (display
-// once via render-on-POST, then discard) and the persisted row (hash only).
-type CreateTokenResult struct {
-	Plaintext string
-	Token     db.ApiToken
-}
-
-// Create issues a secret_api token under projectID. Plaintext is returned
-// by value once; the caller must render it immediately and not re-issue it.
-// Public tokens are NOT issued via this method — they are bootstrapped at
-// project create time.
-func (c *TokensChain) Create(projectID, name string) (*CreateTokenResult, error) {
-	plaintext, hashHex, err := GenerateToken(TokenKindSecret)
-	if err != nil {
-		return nil, err
-	}
-	row, err := c.v.queries().CreateAPITokenForUser(c.ctx, db.CreateAPITokenForUserParams{
-		ID:        idgen.New(),
-		ProjectID: projectID,
-		Name:      name,
-		TokenHash: hashHex,
-		UserID:    c.v.userID,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotVisible
-	}
-	if err != nil {
-		return nil, fmt.Errorf("viewer tokens create: %w", err)
-	}
-	return &CreateTokenResult{Plaintext: plaintext, Token: row}, nil
-}
-
-// Revoke sets revoked_at on a viewer-owned token. Already-revoked tokens
-// return ErrNotVisible (collapsed with "not yours" / "wrong project" for the
-// same enumeration defense).
-func (c *TokensChain) Revoke(projectID, tokenID string) error {
-	rows, err := c.v.queries().RevokeAPITokenForUser(c.ctx, db.RevokeAPITokenForUserParams{
-		ID:        tokenID,
-		ProjectID: projectID,
-		UserID:    c.v.userID,
-	})
-	if err != nil {
-		return fmt.Errorf("viewer tokens revoke: %w", err)
-	}
-	if rows == 0 {
-		return ErrNotVisible
-	}
-	return nil
+	return row.TokenPlaintext, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -338,12 +273,10 @@ type InviteResult struct {
 // CreateInvite issues a one-shot invite for teamID; caller must be a team
 // member. Returns ErrNotVisible on missing membership.
 //
-// Invites reuse GenerateToken's primitive (32 random bytes + sha256 hash +
-// mere_pat_ prefix). The prefix is incidental — invite tokens flow through
-// /invites/:token, not the bearer middleware, so they're never confused
-// with API tokens at runtime.
+// Invite tokens have no prefix — they flow through /invites/{token}, not the
+// bearer middleware, so the leak-scanner prefix gains nothing here.
 func (v *Viewer) CreateInvite(ctx context.Context, teamID string, now time.Time) (*InviteResult, error) {
-	plaintext, hashHex, err := GenerateToken(TokenKindSecret)
+	plaintext, hashHex, err := GenerateInviteToken()
 	if err != nil {
 		return nil, err
 	}

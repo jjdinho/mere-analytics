@@ -83,61 +83,6 @@ func TestHome_ListsTeamsAndProjects(t *testing.T) {
 	}
 }
 
-// TestProjectFlow_CreateTokenRevoke covers the project page UX: create a
-// token (plaintext shown once), revoke it (gone from list), and verify the
-// list NEVER includes the plaintext.
-func TestProjectFlow_CreateTokenRevoke(t *testing.T) {
-	srv, svc := startStack(t)
-	c := signupClient(t, srv, svc, "alice@example.com")
-
-	_, body := mustGet(t, c, srv.URL+"/")
-	teamID := findIDFromHref(t, body, "/teams/")
-
-	resp := formPostExpect(t, c, srv, "/", "/teams/"+teamID+"/projects", url.Values{"name": {"prod"}})
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("create project status: %d", resp.StatusCode)
-	}
-	projectURL := resp.Header.Get("Location")
-	resp.Body.Close()
-
-	// Create a token. Response is render-on-POST with plaintext.
-	resp = formPostExpect(t, c, srv, projectURL, projectURL+"/tokens", url.Values{"name": {"ci"}})
-	body2, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(string(body2), auth.TokenPrefix) {
-		t.Errorf("create-token response missing %q prefix:\n%s", auth.TokenPrefix, body2)
-	}
-	// Extract the plaintext for the leakage-assertion below.
-	tokenPat := regexp.MustCompile(auth.TokenPrefix + `[A-Za-z0-9_-]{43}`)
-	plain := tokenPat.FindString(string(body2))
-	if plain == "" {
-		t.Fatalf("could not locate plaintext token in response body")
-	}
-
-	// Subsequent GET to project page must NOT contain the plaintext (only
-	// the name + revoke button); this is the negative leakage assertion.
-	_, body3 := mustGet(t, c, srv.URL+projectURL)
-	if strings.Contains(body3, plain) {
-		t.Errorf("project page leaks plaintext token after creation: %s", body3)
-	}
-	if strings.Contains(body3, auth.TokenPrefix) {
-		t.Errorf("project page still contains token prefix after creation: %s", body3)
-	}
-
-	// Revoke and verify the list updates.
-	tokenID := findIDFromHref(t, body3, projectURL+"/tokens/")
-	revResp := formPostExpect(t, c, srv, projectURL, projectURL+"/tokens/"+tokenID+"/revoke", url.Values{})
-	revResp.Body.Close()
-	if revResp.StatusCode != http.StatusSeeOther {
-		t.Errorf("revoke status: %d want 303", revResp.StatusCode)
-	}
-
-	_, body4 := mustGet(t, c, srv.URL+projectURL)
-	if strings.Contains(body4, tokenID) {
-		t.Errorf("revoked token still listed: %s", body4)
-	}
-}
-
 // TestProject_SoftDelete_then404 verifies a soft-deleted project's GET
 // returns 404 — both for the owner and (implicitly) for everyone else.
 func TestProject_SoftDelete_then404(t *testing.T) {
@@ -175,18 +120,13 @@ func TestCrossUserAuth_Matrix(t *testing.T) {
 	cAlice := signupClient(t, srv, svc, "alice@example.com")
 	cBob := signupClient(t, srv, svc, "bob@example.com")
 
-	// Bob creates a team-owned project + token for the matrix.
+	// Bob creates a team-owned project for the matrix.
 	_, bobHome := mustGet(t, cBob, srv.URL+"/")
 	bobTeamID := findIDFromHref(t, bobHome, "/teams/")
 	pResp := formPostExpect(t, cBob, srv, "/", "/teams/"+bobTeamID+"/projects", url.Values{"name": {"bobs-thing"}})
 	bobProjectURL := pResp.Header.Get("Location")
 	pResp.Body.Close()
 	bobProjectID := strings.TrimPrefix(bobProjectURL, "/projects/")
-
-	tResp := formPostExpect(t, cBob, srv, bobProjectURL, bobProjectURL+"/tokens", url.Values{"name": {"bobs-token"}})
-	tBody, _ := io.ReadAll(tResp.Body)
-	tResp.Body.Close()
-	bobTokenID := findIDFromHref(t, string(tBody), bobProjectURL+"/tokens/")
 
 	// Matrix of (method, path) Alice tries against Bob's UUIDs.
 	type row struct {
@@ -199,8 +139,6 @@ func TestCrossUserAuth_Matrix(t *testing.T) {
 		{"POST", "/teams/" + bobTeamID + "/invites", url.Values{}},
 		{"POST", "/teams/" + bobTeamID + "/projects", url.Values{"name": {"sneaky"}}},
 		{"POST", "/projects/" + bobProjectID + "/delete", url.Values{}},
-		{"POST", "/projects/" + bobProjectID + "/tokens", url.Values{"name": {"sneaky"}}},
-		{"POST", "/projects/" + bobProjectID + "/tokens/" + bobTokenID + "/revoke", url.Values{}},
 	}
 	for _, r := range rows {
 		t.Run(r.method+" "+r.path, func(t *testing.T) {
@@ -236,10 +174,10 @@ func inviteURLForTeam(t *testing.T, srv *httptest.Server, cAlice *http.Client) (
 	body, _ := io.ReadAll(invResp.Body)
 	invResp.Body.Close()
 
-	pat := regexp.MustCompile(`/invites/` + auth.TokenPrefix + `[A-Za-z0-9_-]{43}`)
+	pat := regexp.MustCompile(`/invites/[A-Za-z0-9_-]{43}`)
 	m := pat.FindString(string(body))
 	if m == "" {
-		fullPat := regexp.MustCompile(`https?://[^"]*?/invites/` + auth.TokenPrefix + `[A-Za-z0-9_-]{43}`)
+		fullPat := regexp.MustCompile(`https?://[^"]*?/invites/[A-Za-z0-9_-]{43}`)
 		full := fullPat.FindString(string(body))
 		if full == "" {
 			t.Fatalf("no invite URL in team page body:\n%s", body)
@@ -353,7 +291,7 @@ func TestInviteFlow_AnonDuplicateEmail(t *testing.T) {
 func TestInviteFlow_StrictOnInvalidToken(t *testing.T) {
 	srv, _ := startStack(t)
 	c := clientWithJar(t)
-	bogusPath := "/invites/" + auth.TokenPrefix + strings.Repeat("z", 43)
+	bogusPath := "/invites/" + strings.Repeat("z", 43)
 
 	// GET shows the InviteInvalid page (404).
 	resp, body := mustGet(t, c, srv.URL+bogusPath)
@@ -480,7 +418,7 @@ func TestInvalidInvite_ReturnsConfirmPageWith404(t *testing.T) {
 	srv, _ := startStack(t)
 	c := clientWithJar(t)
 
-	resp, err := c.Get(srv.URL + "/invites/" + auth.TokenPrefix + strings.Repeat("z", 43))
+	resp, err := c.Get(srv.URL + "/invites/" + strings.Repeat("z", 43))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}

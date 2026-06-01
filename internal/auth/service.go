@@ -349,7 +349,7 @@ func (s *Service) Queries() *db.Queries { return s.queries }
 // should go through the viewer chain (matches ConsumeInvite's exported
 // pattern — exported only when the web layer calls it directly).
 func (s *Service) createProjectWithPublicToken(ctx context.Context, userID, teamID, name string) (db.Project, error) {
-	plaintext, hashHex, err := GenerateToken(TokenKindPublic)
+	plaintext, hashHex, err := GeneratePublicToken()
 	if err != nil {
 		return db.Project{}, fmt.Errorf("project create: generate public token: %w", err)
 	}
@@ -381,7 +381,7 @@ func (s *Service) createProjectWithPublicToken(ctx context.Context, userID, team
 		ProjectID:      proj.ID,
 		Name:           "snippet",
 		TokenHash:      hashHex,
-		TokenPlaintext: &plaintext,
+		TokenPlaintext: plaintext,
 	}); err != nil {
 		return db.Project{}, fmt.Errorf("project create: insert public token: %w", err)
 	}

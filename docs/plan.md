@@ -63,7 +63,8 @@ Self-hosters get the full product. No "cloud-only" features in this repo.
        │  teams,      │         │   → events_v2    │
        │  projects,   │         │  sessions_v1     │
        │  api_tokens, │         │  persons_v1      │
-       │  sessions,   │         │  groups_v1       │
+       │  oauth_*,    │         │  groups_v1       │
+       │  sessions,   │         │                  │
        │  failed_evts │         │                  │
        └──────────────┘         └──────────────────┘
 ```
@@ -114,9 +115,9 @@ One binary, two databases. No worker process in v1 — async work runs as gorout
   /query/                   # query executor: attaches additional_table_filters per request
   /events/                  # read-side: list events, sessions, persons, groups
   /mcp/                     # MCP endpoint + tool definitions
-  /web/                     # web UI handlers (signup, projects, tokens, explorer, playground)
-  /auth/                    # sessions, API tokens, password hashing
-  /projects/                # project + token CRUD
+  /web/                     # web UI + OAuth handlers (login, projects, /oauth/*, /v1/whoami)
+  /auth/                    # sessions, public ingest token, password hashing
+  /oauth/                   # OAuth 2.1 server: codes, access tokens, PKCE, client registry
   /clickhouse/              # CH client (admin + readonly pools), schema bootstrap
   /postgres/                # PG client, sqlc-generated code
   /config/                  # env config struct
@@ -159,7 +160,10 @@ There is no operator CLI. Operator-only actions (password reset, project wipe, e
 | `teams` | a team owns one or more projects; every user has at least one (auto-created on signup) |
 | `team_memberships` | user ↔ team; no role distinction in v1 (all members equal) |
 | `projects` | scoped to a team; soft-deletable (`deleted_at` column) |
-| `api_tokens` | scoped to a project; bearer tokens for the public API + MCP |
+| `api_tokens` | scoped to a project; public ingest token (`mere_pub_…`) for `/v1/ingest` |
+| `oauth_clients` | OAuth client registry (RFC 7591 dynamic registration) |
+| `oauth_codes` | short-lived (10 min) PKCE authorization codes; one-shot |
+| `oauth_access_tokens` | 1-hour bearer tokens for `/v1/* + /mcp`, scoped to (user, project) |
 | `sessions` | web UI login sessions |
 | `team_invites` | one-shot invite links: `token`, `team_id`, `created_by`, `expires_at`, `consumed_at` |
 | `failed_events` | DLQ for ingest batches that failed to land in ClickHouse |
@@ -204,7 +208,7 @@ This buffers small inserts ClickHouse-side and flushes in larger batches, reduci
 
 ## Public API
 
-All endpoints are project-scoped via API token (Bearer auth). Cursor pagination, ClickHouse error passthrough, JSON in/out.
+All endpoints are project-scoped via OAuth bearer tokens (issued by the in-process OAuth 2.1 server at `/oauth/*`). Cursor pagination, ClickHouse error passthrough, JSON in/out. `/v1/ingest` is the exception — it stays on the public `mere_pub_` snippet token in `api_tokens`, since the snippet lives in client HTML.
 
 **Soft-deleted projects return `404 Not Found` on every `/v1/*` endpoint** — the API behaves exactly as if the project never existed. Underlying ClickHouse data is retained until an operator runs `kamal wipe-project`, so a deletion can be undone via direct SQL up to that point.
 
@@ -229,7 +233,7 @@ The `/v1/query` body is `{"sql": "..."}`. The response is `{"columns": [...], "r
 
 Strict on required fields, lenient on extras:
 
-- **Required**: `event` (string), `timestamp` (ISO 8601 or epoch ms). Project comes from the API token, not the payload.
+- **Required**: `event` (string), `timestamp` (ISO 8601 or epoch ms). Project comes from the public ingest token (`mere_pub_…`), not the payload.
 - **Optional but supported first-class**: `distinct_id`, `properties` (arbitrary JSON), `$session_id`, `$group_*`.
 - **Extras**: any other top-level field is stored verbatim in a JSON column. No rejection. Consumers can query their own fields without us shipping a migration.
 - **Rejection** = HTTP 400 with a per-event error array; the rest of the batch is accepted. We never silently drop.
@@ -241,7 +245,7 @@ Server-rendered (templ) + htmx for interactivity. Pages:
 - `/login`, `/logout` — there is no public signup route. The first user is created by the operator via `kamal create-user` (see "Operator actions"); subsequent users join via invite links. This means the deployer doesn't need to front the URL with an ACL to keep strangers out.
 - `/teams/:id` — team settings, member list, "Generate invite link" button. Clicking produces a one-shot URL (`/invites/:token`) that the inviter copies and shares out-of-band. Visiting the URL while logged-out renders an inline signup form (POST creates the account, consumes the invite, and logs the user in atomically); while logged-in, it adds the current user to the team. Each token is consumable once and has a 7-day TTL.
 - `/teams/:id/projects` — projects in this team; create / soft-delete.
-- `/projects/:id` — settings, API tokens (create / revoke).
+- `/projects/:id` — settings + the auto-provisioned public ingest token (always-visible copybox). `/v1/* + /mcp` bearers are not issued here; they come from the OAuth consent flow at `/oauth/authorize`.
 - `/projects/:id/events` — recent events table, filterable, paginated.
 - `/projects/:id/query` — SQL playground (textarea + Run button, results table).
 
@@ -250,9 +254,9 @@ That's the whole UI. CodeMirror or Monaco gets dropped into the query page only 
 ## Auth
 
 - **Web UI:** session cookie (HttpOnly, SameSite=Lax), backed by `sessions` table.
-- **Public API + MCP:** Bearer API tokens, scoped to a project. Tokens are issued in the web UI, stored hashed (sha256) in `api_tokens`.
+- **`/v1/ingest`:** project-scoped public token (`mere_pub_…`) in `api_tokens`. Auto-provisioned at project create; non-secret by design (lives in client HTML).
+- **`/v1/* + /mcp`:** OAuth 2.1 access tokens (PKCE-only authorization-code flow). Stored hashed (sha256) in `oauth_access_tokens`; 1-hour TTL; one project per grant chosen at consent. Server lives in-process at `/oauth/{register,authorize,token}` with RFC 8414 discovery at `/.well-known/oauth-authorization-server`. No refresh tokens — re-authorize on expiry. Implementation in `internal/oauth/`.
 - **No in-app password reset in v1.** Operators reset via the `kamal reset-password` alias (see "Operator actions"), which executes a SQL `UPDATE` against the `postgres` accessory using `pgcrypto`'s `crypt(..., gen_salt('bf', 10))`. Go's `bcrypt` and `pgcrypto`'s `bf` hashes are wire-compatible (both produce standard `$2a$` format), so the user logs in normally afterwards. The user is forced to change the password on next login.
-- **No OAuth in v1.** MCP supports bearer tokens; that's enough.
 
 ## Multi-tenant isolation
 
@@ -685,6 +689,8 @@ Shipped on branch `jjdinho/check-build-progress`. A logged-in user can view thei
 - API token expiry (TODOS.md item) — tokens are forever-valid until manually revoked; standard hygiene but not v1-blocking.
 - Revoked-tokens audit view (TODOS.md item) — needs Step 5's bearer middleware to add `last_used_at` for the view to carry real signal.
 - Bearer-auth lookup function — owned by Step 5 (its first consumer is `/v1/ingest`).
+
+**Subsequent change (OAuth refactor):** Step 4's `mere_pat_…` secret-API bearer (and the render-on-POST issuance UX) was retired in favor of an OAuth 2.1 authorization-code + PKCE flow. `api_tokens` now only carries the public `mere_pub_…` snippet token; /v1/* + /mcp bearer auth goes through `oauth_access_tokens`. The historical record above is preserved verbatim; the live design is in `internal/oauth/` and migrations `0006_oauth` + `0007_drop_api_token_kind`.
 
 ---
 

@@ -1,0 +1,57 @@
+package views
+
+import (
+	"github.com/jjdinho/mere-analytics/internal/auth"
+	"github.com/jjdinho/mere-analytics/internal/postgres/db"
+)
+
+// OAuthConsentData powers /oauth/authorize's consent page. Carries the
+// client identity the user is being asked to authorize, the projects the
+// viewer can grant access to, and the verbatim authorize-request params
+// so a POST decision can hand them back unchanged.
+type OAuthConsentData struct {
+	ClientID            string
+	ClientName          string
+	RedirectURI         string
+	State               string
+	Scope               string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	Projects            []db.Project
+}
+
+templ OAuthConsent(session *auth.Session, data OAuthConsentData) {
+	@Layout("Authorize "+data.ClientName, session) {
+		<h1>Authorize { data.ClientName }</h1>
+		<p>This application wants access to <strong>{ data.Scope }</strong> on a project of your choice.</p>
+
+		<form method="POST" action="/oauth/authorize">
+			@CSRFField()
+			<input type="hidden" name="client_id" value={ data.ClientID }/>
+			<input type="hidden" name="redirect_uri" value={ data.RedirectURI }/>
+			<input type="hidden" name="state" value={ data.State }/>
+			<input type="hidden" name="scope" value={ data.Scope }/>
+			<input type="hidden" name="code_challenge" value={ data.CodeChallenge }/>
+			<input type="hidden" name="code_challenge_method" value={ data.CodeChallengeMethod }/>
+			<input type="hidden" name="response_type" value="code"/>
+
+			<label>
+				Project
+				<select name="project_id" required>
+					for _, p := range data.Projects {
+						<option value={ p.ID }>{ p.Name }</option>
+					}
+				</select>
+			</label>
+
+			<div class="actions">
+				<button type="submit" name="decision" value="approve">Approve</button>
+				<button type="submit" name="decision" value="deny" class="danger">Deny</button>
+			</div>
+		</form>
+
+		if len(data.Projects) == 0 {
+			<p class="muted">You don't have any projects yet. Create one before authorizing this app.</p>
+		}
+	}
+}

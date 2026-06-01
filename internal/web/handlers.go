@@ -74,7 +74,11 @@ func getLogin(svc *auth.Service, logger *slog.Logger) http.HandlerFunc {
 				teamName = row.TeamName
 			}
 		}
-		renderLogin(w, r, "", "", invite, teamName)
+		next := r.URL.Query().Get("next")
+		if !safeRedirect(next) {
+			next = ""
+		}
+		renderLogin(w, r, "", "", invite, teamName, next)
 	}
 }
 
@@ -91,11 +95,15 @@ func postLogin(svc *auth.Service, logger *slog.Logger, secureCookies bool) http.
 		email := r.PostForm.Get("email")
 		password := r.PostForm.Get("password")
 		invite := r.PostForm.Get("invite")
+		next := r.PostForm.Get("next")
+		if !safeRedirect(next) {
+			next = ""
+		}
 
 		user, err := svc.Authenticate(r.Context(), email, password)
 		if errors.Is(err, auth.ErrInvalidCredentials) {
 			w.WriteHeader(http.StatusUnauthorized)
-			renderLogin(w, r, email, "Invalid credentials.", invite, "")
+			renderLogin(w, r, email, "Invalid credentials.", invite, "", next)
 			return
 		}
 		if err != nil {
@@ -129,6 +137,10 @@ func postLogin(svc *auth.Service, logger *slog.Logger, secureCookies bool) http.
 			http.Redirect(w, r, "/teams/"+team.ID, http.StatusSeeOther)
 			return
 		}
+		if next != "" {
+			http.Redirect(w, r, next, http.StatusSeeOther)
+			return
+		}
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }
@@ -148,7 +160,7 @@ func postLogout(svc *auth.Service, logger *slog.Logger, secureCookies bool) http
 	}
 }
 
-func renderLogin(w http.ResponseWriter, r *http.Request, email, errMsg, invitePlaintext, inviteTeamName string) {
+func renderLogin(w http.ResponseWriter, r *http.Request, email, errMsg, invitePlaintext, inviteTeamName, next string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = views.Login(email, errMsg, invitePlaintext, inviteTeamName).Render(r.Context(), w)
+	_ = views.Login(email, errMsg, invitePlaintext, inviteTeamName, next).Render(r.Context(), w)
 }

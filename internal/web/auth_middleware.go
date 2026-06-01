@@ -146,10 +146,18 @@ func methodIsSafe(m string) bool {
 	return false
 }
 
-// pathIsAPI reports whether p targets a bearer-authed surface (/v1/*, /mcp).
-// Those routes carry no session cookie and so are immune to CSRF; checking the
+// pathIsAPI reports whether p targets a bearer-authed surface (/v1/*, /mcp)
+// or a non-cookie OAuth endpoint (/oauth/register, /oauth/token). Those
+// routes carry no session cookie and so are immune to CSRF; checking the
 // token would be both unnecessary and impossible.
+//
+// /oauth/authorize POST is deliberately NOT exempt — it's a session-bearing
+// browser submission from the consent page and needs the CSRF check.
 func pathIsAPI(p string) bool {
+	switch p {
+	case "/oauth/register", "/oauth/token":
+		return true
+	}
 	return strings.HasPrefix(p, "/v1/") || p == "/mcp" || strings.HasPrefix(p, "/mcp/")
 }
 
