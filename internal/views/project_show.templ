@@ -28,6 +28,9 @@ templ ProjectShow(session *auth.Session, data ProjectShowData) {
 		<p class="muted">Paste this into the snippet on your site. It's public by design — anything that can see your page can see it.</p>
 		<input type="text" value={ data.PublicToken } readonly onclick="this.select()" class="copybox" data-test="public-token"/>
 
+		<h2>Query</h2>
+		<p><a href={ templ.URL("/projects/" + data.Project.ID + "/query") }>Open query playground</a></p>
+
 		<h2>Danger zone</h2>
 		<form method="POST" action={ templ.URL("/projects/" + data.Project.ID + "/delete") } onsubmit="return confirm('Delete this project? You can recover via the operator console.');">
 			@CSRFField()

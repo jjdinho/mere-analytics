@@ -26,6 +26,7 @@ import (
 	mmigrate "github.com/jjdinho/mere-analytics/internal/migrate"
 	"github.com/jjdinho/mere-analytics/internal/oauth"
 	"github.com/jjdinho/mere-analytics/internal/postgres"
+	"github.com/jjdinho/mere-analytics/internal/query"
 	"github.com/jjdinho/mere-analytics/internal/web"
 	"github.com/jjdinho/mere-analytics/migrations"
 )
@@ -98,7 +99,8 @@ func run(logger *slog.Logger) error {
 	}
 	defer chReadonly.Close()
 	logger.Info("ch readonly open")
-	_ = chReadonly // wired but unused until step 8 (query API)
+	queryExec := query.NewExecutor(chReadonly, cfg.ClickHouseDatabase)
+	querySchema := query.NewSchemaProvider(chReadonly, queryExec)
 
 	// --- Ingest pipeline ---
 	ingestSvc := ingest.NewService(pgPool, chAdmin, ingest.Options{
@@ -133,6 +135,9 @@ func run(logger *slog.Logger) error {
 			AllowedOrigins:       cfg.AllowedOrigins,
 			IngestMaxBodyBytes:   cfg.IngestMaxBodyBytes,
 			DLQDepth503Threshold: cfg.DLQDepth503Threshold,
+			QueryExecutor:        queryExec,
+			QuerySchema:          querySchema,
+			QueryMaxBodyBytes:    cfg.QueryMaxBodyBytes,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

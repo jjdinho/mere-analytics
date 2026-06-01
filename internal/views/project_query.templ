@@ -1,0 +1,86 @@
+package views
+
+import (
+	"fmt"
+
+	"github.com/jjdinho/mere-analytics/internal/auth"
+	"github.com/jjdinho/mere-analytics/internal/postgres/db"
+	"github.com/jjdinho/mere-analytics/internal/query"
+)
+
+type ProjectQueryData struct {
+	Project db.Project
+	PageTitle string
+	SQL     string
+	Schema  query.Schema
+	Result  query.Result
+	ErrMsg  string
+}
+
+templ ProjectQuery(session *auth.Session, data ProjectQueryData) {
+	@Layout(data.PageTitle, session) {
+		<div class="query-page">
+			<section class="query-main">
+				<div class="page-title-row">
+					<div>
+						<h1>{ data.Project.Name }</h1>
+						<p class="muted">Query playground</p>
+					</div>
+					<a href={ templ.URL("/projects/" + data.Project.ID) }>Project settings</a>
+				</div>
+				@FormError(data.ErrMsg)
+				<form method="POST" action={ templ.URL("/projects/" + data.Project.ID + "/query") } class="query-form">
+					@CSRFField()
+					<label>
+						SQL
+						<textarea name="sql" spellcheck="false">{ data.SQL }</textarea>
+					</label>
+					<button type="submit">Run</button>
+				</form>
+				if len(data.Result.Columns) > 0 {
+					<div class="query-stats">{ fmt.Sprintf("%d rows in %dms", data.Result.Stats.Rows, data.Result.Stats.ElapsedMS) }</div>
+					<div class="results-scroll">
+						<table class="results-table">
+							<thead>
+								<tr>
+									for _, c := range data.Result.Columns {
+										<th>{ c.Name }</th>
+									}
+								</tr>
+							</thead>
+							<tbody>
+								for _, row := range data.Result.Rows {
+									<tr>
+										for _, cell := range row {
+											<td>{ cellString(cell) }</td>
+										}
+									</tr>
+								}
+							</tbody>
+						</table>
+					</div>
+				}
+			</section>
+			<aside class="schema-sidebar">
+				<h2>Schema</h2>
+				for _, table := range data.Schema.Tables {
+					<div class="schema-table">
+						<h3>{ table.Name }</h3>
+						<ul>
+							for _, col := range table.Columns {
+								<li><code>{ col.Name }</code><span>{ col.Type }</span></li>
+							}
+						</ul>
+					</div>
+				}
+			</aside>
+		</div>
+	}
+}
+
+func cellString(v any) string {
+	if v == nil {
+		return "NULL"
+	}
+	return fmt.Sprint(v)
+}
