@@ -223,7 +223,7 @@ The schema response is a small JSON catalog of queryable tables and columns, e.g
 Strict on required fields, lenient on extras:
 
 - **Required**: `event` (string), `timestamp` (ISO 8601 or epoch ms). Project comes from the public ingest token (`mere_pub_…`), not the payload.
-- **Optional but supported first-class**: `distinct_id`, `properties` (arbitrary JSON), `$session_id`, `$group_*`.
+- **Optional but supported first-class**: `distinct_id`, `properties` (arbitrary JSON), `session_id`.
 - **Extras**: any other top-level field is stored verbatim in a JSON column. No rejection. Consumers can query their own fields without us shipping a migration.
 - **Rejection** = HTTP 400 with a per-event error array; the rest of the batch is accepted. We never silently drop.
 
