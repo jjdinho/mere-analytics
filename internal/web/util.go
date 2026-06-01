@@ -1,6 +1,8 @@
 package web
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -27,6 +29,31 @@ func absoluteURL(r *http.Request, path string) string {
 // test can swap in a deterministic clock by intercepting via context; today
 // it's just time.Now. Pulled out of the handler bodies for readability.
 func nowOrSvcNow(_ *http.Request) time.Time { return time.Now() }
+
+// DecodeJSON reads the request body as JSON into T with the uniform error
+// mapping the v1 endpoints expect: a body that overran MaxBody → 413, a JSON
+// syntax/type error → 400. On either failure the response is fully written
+// and ok=false is returned so the handler should bail. On success the
+// decoded value is returned with ok=true.
+//
+// Pair with MaxBody upstream so r.Body is already wrapped in
+// http.MaxBytesReader; this helper just catches the *http.MaxBytesError the
+// reader surfaces and converts it to the right status.
+func DecodeJSON[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
+	var v T
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&v); err != nil {
+		var mb *http.MaxBytesError
+		if errors.As(err, &mb) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return v, false
+		}
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return v, false
+	}
+	return v, true
+}
 
 // safeRedirect reports whether the given post-login `next` target is a
 // same-origin path safe to redirect to without enabling an open-redirect or

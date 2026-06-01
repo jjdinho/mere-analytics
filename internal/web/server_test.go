@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -26,9 +27,18 @@ func TestHealthz(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status: got %d want 200", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "ok\n" {
-		t.Errorf("body: got %q want %q", body, "ok\n")
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content-type: got %q want application/json", ct)
+	}
+	var body healthzPayload
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != "ok" {
+		t.Errorf("status field: got %q want ok", body.Status)
+	}
+	if body.IngestDisabled {
+		t.Error("ingest_disabled: got true want false (no ingest service wired)")
 	}
 }
 

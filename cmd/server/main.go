@@ -10,7 +10,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +22,7 @@ import (
 	"github.com/jjdinho/mere-analytics/internal/auth"
 	"github.com/jjdinho/mere-analytics/internal/clickhouse"
 	"github.com/jjdinho/mere-analytics/internal/config"
+	"github.com/jjdinho/mere-analytics/internal/ingest"
 	mmigrate "github.com/jjdinho/mere-analytics/internal/migrate"
 	"github.com/jjdinho/mere-analytics/internal/oauth"
 	"github.com/jjdinho/mere-analytics/internal/postgres"
@@ -98,10 +98,23 @@ func run(logger *slog.Logger) error {
 	}
 	defer chReadonly.Close()
 	logger.Info("ch readonly open")
+	_ = chReadonly // wired but unused until step 8 (query API)
 
-	// chReadonly is wired but unused until step 8 (query API). Pin reference
-	// so the variable isn't flagged unused while still letting it close cleanly.
-	_ = (*sql.DB)(chReadonly)
+	// --- Ingest pipeline ---
+	ingestSvc := ingest.NewService(pgPool, chAdmin, ingest.Options{
+		EventBuffer:          cfg.IngestEventBuffer,
+		FlushEvents:          cfg.IngestFlushEvents,
+		FlushInterval:        cfg.IngestFlushInterval,
+		ShutdownGrace:        cfg.IngestShutdownGrace,
+		Disabled:             cfg.IngestDisabled,
+		MaxBodyBytes:         cfg.IngestMaxBodyBytes,
+		DLQDrainBatchLimit:   cfg.IngestDLQDrainBatchLimit,
+		DLQDepth503Threshold: cfg.DLQDepth503Threshold,
+	}, logger)
+	ingestSvc.Start(ctx)
+	if cfg.IngestDisabled {
+		logger.Warn("ingest disabled at boot (INGEST_DISABLED=true)")
+	}
 
 	// --- HTTP ---
 	authSvc := auth.NewService(pgPool)
@@ -111,11 +124,15 @@ func run(logger *slog.Logger) error {
 	srv := &http.Server{
 		Addr: fmt.Sprintf(":%d", cfg.Port),
 		Handler: web.Handler(web.Options{
-			AuthService:   authSvc,
-			OAuthService:  oauthSvc,
-			OAuthIssuer:   cfg.OAuthIssuerURL,
-			Logger:        logger,
-			SecureCookies: cfg.SecureCookies,
+			AuthService:          authSvc,
+			OAuthService:         oauthSvc,
+			OAuthIssuer:          cfg.OAuthIssuerURL,
+			Logger:               logger,
+			SecureCookies:        cfg.SecureCookies,
+			IngestService:        ingestSvc,
+			AllowedOrigins:       cfg.AllowedOrigins,
+			IngestMaxBodyBytes:   cfg.IngestMaxBodyBytes,
+			DLQDepth503Threshold: cfg.DLQDepth503Threshold,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -128,13 +145,37 @@ func run(logger *slog.Logger) error {
 		close(serveErr)
 	}()
 
+	// SIGTERM choreography — three phases so no event is silently dropped.
+	//
+	//   SIGTERM
+	//      │
+	//      ▼
+	//   phase 1 — ingestSvc.Flags().SetDisabled(true)  ; new /v1/ingest → 503
+	//      │
+	//      ▼
+	//   phase 2 — srv.Shutdown(httpCtx 10s)             ; in-flight handlers
+	//      │                                              complete enqueue
+	//      ▼
+	//   phase 3 — ingestSvc.Shutdown(grace)             ; close input gate,
+	//                                                     drain → CH, residual → DLQ
+	//      │
+	//      ▼
+	//   run() returns ──► deferred pgPool.Close / chAdmin.Close run
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down")
-		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancelShutdown()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
+		ingestSvc.Flags().SetDisabled(true) // phase 1
+
+		httpCtx, cancelHTTP := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelHTTP()
+		if err := srv.Shutdown(httpCtx); err != nil { // phase 2
 			logger.Warn("http shutdown forced", "err", err)
+		}
+
+		ingestCtx, cancelIngest := context.WithTimeout(context.Background(), cfg.IngestShutdownGrace)
+		defer cancelIngest()
+		if err := ingestSvc.Shutdown(ingestCtx); err != nil { // phase 3
+			logger.Warn("ingest shutdown", "err", err)
 		}
 		return nil
 	case err := <-serveErr:

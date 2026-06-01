@@ -29,3 +29,15 @@ LIMIT 1;
 -- in the same tx by a query that already enforced membership.
 INSERT INTO api_tokens (id, project_id, name, token_hash, token_plaintext)
 VALUES ($1, $2, $3, $4, $5);
+
+-- name: GetActiveIngestTokenByHash :one
+-- Resolves a mere_pub_* token hash to its project. Excludes soft-deleted
+-- projects so a deleted project can't keep accepting writes. Used by the
+-- ingest path's requirePublicToken middleware; the caller has already
+-- verified the PublicTokenPrefix so a non-prefix bearer never reaches here.
+SELECT t.id, t.project_id
+FROM api_tokens t
+JOIN projects p ON p.id = t.project_id
+WHERE t.token_hash = $1
+  AND t.revoked_at IS NULL
+  AND p.deleted_at IS NULL;

@@ -81,10 +81,10 @@ func TestBoot_endToEnd(t *testing.T) {
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
 	waitFor200(t, healthURL, 30*time.Second)
 
-	// Healthz body.
+	// Healthz body — JSON since step 5 (ingest-aware health).
 	body := mustGetBody(t, healthURL)
-	if strings.TrimSpace(body) != "ok" {
-		t.Errorf("/healthz body: got %q want %q", body, "ok")
+	if !strings.Contains(body, `"status":"ok"`) {
+		t.Errorf("/healthz body: got %q want JSON containing \"status\":\"ok\"", body)
 	}
 
 	// Index page.

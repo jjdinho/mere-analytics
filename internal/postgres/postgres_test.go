@@ -48,9 +48,9 @@ func TestOpen_AndRunMigrations_Idempotent(t *testing.T) {
 		t.Fatalf("migrate second run (must be idempotent): %v", err)
 	}
 
-	// All application tables exist (step 5 added oauth_*).
+	// All application tables exist (step 5 added failed_events).
 	wantTables := []string{
-		"api_tokens",
+		"api_tokens", "failed_events",
 		"oauth_access_tokens", "oauth_clients", "oauth_codes",
 		"projects", "sessions", "team_invites", "team_memberships",
 		"teams", "users",

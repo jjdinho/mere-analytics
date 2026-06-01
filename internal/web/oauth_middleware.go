@@ -1,12 +1,20 @@
 package web
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jjdinho/mere-analytics/internal/oauth"
 )
+
+// markAccessTokenUsedTimeout bounds the fire-and-forget UPDATE so a stuck
+// PG never holds a goroutine open. Two seconds is well clear of healthy
+// latency and short enough that even pgPool.Close() during SIGTERM phase 3
+// only waits a bounded amount on stragglers.
+const markAccessTokenUsedTimeout = 2 * time.Second
 
 // RequireBearer enforces an OAuth bearer token on the wrapped handler. Missing,
 // malformed, expired, or revoked tokens get a uniform 401 with a
@@ -32,6 +40,17 @@ func RequireBearer(svc *oauth.Service, logger *slog.Logger) func(http.Handler) h
 				writeBearerUnauthorized(w, "invalid_token")
 				return
 			}
+			// Fire-and-forget last_used_at stamp. The UPDATE has a 60s
+			// throttle predicate so a hot token only writes the column at
+			// most once per minute; the bounded context keeps a stuck PG
+			// from holding the goroutine open during shutdown.
+			go func(id string) {
+				ctx, cancel := context.WithTimeout(context.Background(), markAccessTokenUsedTimeout)
+				defer cancel()
+				if err := svc.MarkAccessTokenUsed(ctx, id); err != nil {
+					logger.Warn("oauth last_used_at update", "err", err)
+				}
+			}(access.ID)
 			ctx := oauth.ContextWith(r.Context(), &oauth.AccessContext{
 				UserID:    access.UserID,
 				ProjectID: access.ProjectID,

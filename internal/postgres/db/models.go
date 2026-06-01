@@ -18,16 +18,27 @@ type ApiToken struct {
 	TokenPlaintext string
 }
 
+type FailedEvent struct {
+	ID            string
+	BatchPayload  []byte
+	LastError     string
+	AttemptCount  int32
+	CreatedAt     pgtype.Timestamptz
+	LastAttemptAt pgtype.Timestamptz
+	QuarantinedAt pgtype.Timestamptz
+}
+
 type OauthAccessToken struct {
-	ID        string
-	TokenHash string
-	ClientID  string
-	UserID    string
-	ProjectID string
-	Scope     string
-	ExpiresAt pgtype.Timestamptz
-	RevokedAt pgtype.Timestamptz
-	CreatedAt pgtype.Timestamptz
+	ID         string
+	TokenHash  string
+	ClientID   string
+	UserID     string
+	ProjectID  string
+	Scope      string
+	ExpiresAt  pgtype.Timestamptz
+	RevokedAt  pgtype.Timestamptz
+	CreatedAt  pgtype.Timestamptz
+	LastUsedAt pgtype.Timestamptz
 }
 
 type OauthClient struct {
