@@ -20,6 +20,7 @@ import (
 	"github.com/jjdinho/mere-analytics/internal/auth"
 	"github.com/jjdinho/mere-analytics/internal/ingest"
 	"github.com/jjdinho/mere-analytics/internal/oauth"
+	"github.com/jjdinho/mere-analytics/internal/query"
 	"github.com/jjdinho/mere-analytics/internal/static"
 )
 
@@ -44,6 +45,10 @@ type Options struct {
 	AllowedOrigins       []string
 	IngestMaxBodyBytes   int64
 	DLQDepth503Threshold int
+
+	QueryExecutor     *query.Executor
+	QuerySchema       *query.SchemaProvider
+	QueryMaxBodyBytes int64
 }
 
 // Handler builds the application's root http.Handler.
@@ -51,6 +56,9 @@ func Handler(opts Options) http.Handler {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if opts.QueryMaxBodyBytes == 0 {
+		opts.QueryMaxBodyBytes = 256 * 1024
 	}
 
 	mux := http.NewServeMux()
@@ -87,6 +95,10 @@ func Handler(opts Options) http.Handler {
 
 		mux.Handle("GET /projects/{id}", auth(getProject(logger)))
 		mux.Handle("POST /projects/{id}/delete", auth(postProjectDelete(logger)))
+		if opts.QueryExecutor != nil && opts.QuerySchema != nil {
+			mux.Handle("GET /projects/{id}/query", auth(getProjectQuery(opts.QuerySchema, logger)))
+			mux.Handle("POST /projects/{id}/query", auth(MaxBody(opts.QueryMaxBodyBytes)(postProjectQuery(opts.QueryExecutor, opts.QuerySchema, logger))))
+		}
 
 		// Account / password change. The must_change_password gate inside
 		// authMiddleware redirects flagged users here from everywhere else.
@@ -109,6 +121,19 @@ func Handler(opts Options) http.Handler {
 		// mount with the same RequireBearer pattern.
 		bearer := RequireBearer(opts.OAuthService, logger)
 		mux.Handle("GET /v1/whoami", bearer(getWhoami()))
+		if opts.QueryExecutor != nil && opts.QuerySchema != nil {
+			cors := CORS(opts.AllowedOrigins)
+			queryChain := cors(bearer(MaxBody(opts.QueryMaxBodyBytes)(postAPIProjectQuery(opts.AuthService, opts.QueryExecutor, logger))))
+			schemaChain := cors(bearer(getAPIProjectSchema(opts.AuthService, opts.QuerySchema, logger)))
+			mux.Handle("POST /api/v1/projects/{project_id}/query", queryChain)
+			mux.Handle("GET /api/v1/projects/{project_id}/schema", schemaChain)
+			mux.Handle("OPTIONS /api/v1/projects/{project_id}/query", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			})))
+			mux.Handle("OPTIONS /api/v1/projects/{project_id}/schema", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			})))
+		}
 	}
 
 	if opts.IngestService != nil {

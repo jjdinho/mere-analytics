@@ -29,20 +29,24 @@ func CreateDatabase(ctx context.Context, cfg config.Config) error {
 // ProvisionReadonlyUser makes the readonly user's state deterministic on every
 // boot:
 //
-//	CREATE USER IF NOT EXISTS <user> IDENTIFIED ... SETTINGS PROFILE 'readonly'
-//	ALTER  USER             <user> IDENTIFIED ... SETTINGS PROFILE 'readonly'  -- forces pw/profile
-//	GRANT  SELECT ON <db>.* TO <user>                                          -- idempotent
+//	CREATE USER IF NOT EXISTS <user> IDENTIFIED ... SETTINGS readonly=2
+//	ALTER  USER             <user> IDENTIFIED ... SETTINGS readonly=2 -- forces pw/settings
+//	GRANT  SELECT ON <db>.* TO <user>                                 -- idempotent
 //
 // Eliminates silent divergence if a pre-existing user has wrong password,
-// profile, or grants (review finding 2.1 / decision 5).
+// readonly setting, or grants (review finding 2.1 / decision 5).
+//
+// readonly=2 keeps DDL/DML blocked but allows the app to attach per-request
+// SELECT settings such as additional_table_filters, max_result_rows, and
+// max_execution_time. The built-in readonly profile is too strict for Step 6.
 func ProvisionReadonlyUser(ctx context.Context, db *sql.DB, cfg config.Config) error {
 	user := quoteIdent(cfg.ClickHouseReadonlyUser)
 	pw := quoteString(cfg.ClickHouseReadonlyPassword)
 	dbName := quoteIdent(cfg.ClickHouseDatabase)
 
 	stmts := []string{
-		fmt.Sprintf("CREATE USER IF NOT EXISTS %s IDENTIFIED WITH sha256_password BY %s SETTINGS PROFILE 'readonly'", user, pw),
-		fmt.Sprintf("ALTER USER %s IDENTIFIED WITH sha256_password BY %s SETTINGS PROFILE 'readonly'", user, pw),
+		fmt.Sprintf("CREATE USER IF NOT EXISTS %s IDENTIFIED WITH sha256_password BY %s SETTINGS readonly=2", user, pw),
+		fmt.Sprintf("ALTER USER %s IDENTIFIED WITH sha256_password BY %s SETTINGS readonly=2", user, pw),
 		fmt.Sprintf("GRANT SELECT ON %s.* TO %s", dbName, user),
 	}
 	for _, s := range stmts {

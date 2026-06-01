@@ -60,9 +60,13 @@ type Config struct {
 	DLQDepth503Threshold int `env:"DLQ_DEPTH_503_THRESHOLD" envDefault:"100000"`
 
 	// AllowedOrigins restricts the Access-Control-Allow-Origin header on
-	// /v1/ingest. Empty (default) → `*`. Comma-separated list of exact
-	// origins (no wildcards beyond the empty-list case).
+	// /v1/ingest and bearer API routes. Empty (default) → `*`. Comma-separated
+	// list of exact origins (no wildcards beyond the empty-list case).
 	AllowedOrigins []string `env:"ALLOWED_ORIGINS" envSeparator:"," envDefault:""`
+
+	// QueryMaxBodyBytes caps POST /api/v1/projects/:id/query bodies. The query
+	// result itself streams and is bounded by ClickHouse max_result_rows.
+	QueryMaxBodyBytes int64 `env:"QUERY_MAX_BODY_BYTES" envDefault:"262144"`
 }
 
 func Load() (Config, error) {
@@ -139,5 +143,6 @@ func (c Config) LogValue() slog.Value {
 		slog.Int("ingest_dlq_drain_batch_limit", c.IngestDLQDrainBatchLimit),
 		slog.Int("dlq_depth_503_threshold", c.DLQDepth503Threshold),
 		slog.Any("allowed_origins", c.AllowedOrigins),
+		slog.Int64("query_max_body_bytes", c.QueryMaxBodyBytes),
 	)
 }
