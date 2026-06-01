@@ -12,7 +12,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7);
 -- Active = not revoked AND not expired. The unique partial index on
 -- (token_hash) WHERE revoked_at IS NULL keeps this on a single index probe.
 SELECT id, token_hash, client_id, user_id, project_id, scope,
-       expires_at, revoked_at, created_at
+       expires_at, revoked_at, created_at, last_used_at
 FROM oauth_access_tokens
 WHERE token_hash = $1
   AND revoked_at IS NULL
@@ -36,7 +36,7 @@ WHERE expires_at < NOW();
 -- Future "connected apps" page. Returns the joinable surface (client name +
 -- project id + scope + lifecycle timestamps) for the viewer's active grants.
 SELECT t.id, t.token_hash, t.client_id, t.user_id, t.project_id, t.scope,
-       t.expires_at, t.revoked_at, t.created_at,
+       t.expires_at, t.revoked_at, t.created_at, t.last_used_at,
        c.name AS client_name
 FROM oauth_access_tokens t
 JOIN oauth_clients c ON c.id = t.client_id
@@ -44,3 +44,14 @@ WHERE t.user_id = $1
   AND t.revoked_at IS NULL
   AND t.expires_at > NOW()
 ORDER BY t.created_at DESC;
+
+-- name: UpdateOAuthAccessTokenLastUsed :exec
+-- Stamped fire-and-forget by RequireBearer after every successful bearer
+-- lookup. The 60s predicate is the entire throttle: bounds WAL + lock
+-- contention once /v1/query and /mcp are hot paths without an extra round
+-- trip. Granularity is intentional — the connected-apps UI shows "minutes
+-- ago" precision.
+UPDATE oauth_access_tokens
+SET last_used_at = NOW()
+WHERE id = $1
+  AND (last_used_at IS NULL OR last_used_at < NOW() - INTERVAL '60 seconds');

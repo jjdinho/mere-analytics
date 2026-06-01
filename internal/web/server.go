@@ -13,10 +13,12 @@
 package web
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 
 	"github.com/jjdinho/mere-analytics/internal/auth"
+	"github.com/jjdinho/mere-analytics/internal/ingest"
 	"github.com/jjdinho/mere-analytics/internal/oauth"
 	"github.com/jjdinho/mere-analytics/internal/static"
 )
@@ -34,6 +36,14 @@ type Options struct {
 	OAuthIssuer   string
 	Logger        *slog.Logger
 	SecureCookies bool
+
+	// IngestService + the three following knobs wire POST /v1/ingest. Nil
+	// IngestService is supported so degenerate test scenarios that build a
+	// handler without a CH pool still work — /v1/ingest is just absent.
+	IngestService        *ingest.Service
+	AllowedOrigins       []string
+	IngestMaxBodyBytes   int64
+	DLQDepth503Threshold int
 }
 
 // Handler builds the application's root http.Handler.
@@ -45,10 +55,7 @@ func Handler(opts Options) http.Handler {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ok\n"))
-	})
+	mux.HandleFunc("GET /healthz", healthzHandler(opts))
 
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(static.FS()))))
 
@@ -104,9 +111,63 @@ func Handler(opts Options) http.Handler {
 		mux.Handle("GET /v1/whoami", bearer(getWhoami()))
 	}
 
+	if opts.IngestService != nil {
+		cors := CORS(opts.AllowedOrigins)
+		ingestChain := cors(
+			MaxBody(opts.IngestMaxBodyBytes)(
+				requirePublicToken(opts.IngestService, logger)(
+					postIngest(opts.IngestService, logger))))
+		mux.Handle("POST /v1/ingest", ingestChain)
+		mux.Handle("OPTIONS /v1/ingest", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})))
+	}
+
 	var chain http.Handler = mux
 	if opts.AuthService != nil {
 		chain = authMiddleware(opts.AuthService, logger, opts.SecureCookies)(chain)
 	}
 	return recoverMiddleware(logger)(logMiddleware(logger)(chain))
+}
+
+// healthzPayload is the JSON body /healthz emits. ingest_disabled rides on
+// every healthy response so operators can confirm the kill switch state
+// without grepping logs. depth is the in-process DLQ gauge.
+type healthzPayload struct {
+	Status         string `json:"status"`
+	IngestDisabled bool   `json:"ingest_disabled"`
+	DLQDepth       int64  `json:"dlq_depth"`
+}
+
+// healthzHandler reports the ingest pipeline's health as JSON. Returns 503
+// when the fatal flag is set OR the DLQ depth has crossed the configured
+// threshold; in both cases kamal-proxy will circuit-break the instance.
+// logMiddleware already skips /healthz so this is cheap to poll.
+func healthzHandler(opts Options) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var (
+			disabled bool
+			fatal    bool
+			depth    int64
+		)
+		if opts.IngestService != nil {
+			f := opts.IngestService.Flags()
+			disabled = f.IsDisabled()
+			fatal = f.IsFatal()
+			depth = f.DLQDepth()
+		}
+		status := "ok"
+		code := http.StatusOK
+		if fatal || (opts.DLQDepth503Threshold > 0 && depth > int64(opts.DLQDepth503Threshold)) {
+			status = "down"
+			code = http.StatusServiceUnavailable
+		}
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(healthzPayload{
+			Status:         status,
+			IngestDisabled: disabled,
+			DLQDepth:       depth,
+		})
+	}
 }

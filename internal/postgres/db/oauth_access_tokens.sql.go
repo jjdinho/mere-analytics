@@ -30,7 +30,7 @@ func (q *Queries) DeleteExpiredOAuthAccessTokens(ctx context.Context) (int64, er
 
 const getActiveOAuthAccessTokenByHash = `-- name: GetActiveOAuthAccessTokenByHash :one
 SELECT id, token_hash, client_id, user_id, project_id, scope,
-       expires_at, revoked_at, created_at
+       expires_at, revoked_at, created_at, last_used_at
 FROM oauth_access_tokens
 WHERE token_hash = $1
   AND revoked_at IS NULL
@@ -52,6 +52,7 @@ func (q *Queries) GetActiveOAuthAccessTokenByHash(ctx context.Context, tokenHash
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.CreatedAt,
+		&i.LastUsedAt,
 	)
 	return i, err
 }
@@ -92,7 +93,7 @@ func (q *Queries) InsertOAuthAccessToken(ctx context.Context, arg InsertOAuthAcc
 
 const listActiveAccessTokensForUser = `-- name: ListActiveAccessTokensForUser :many
 SELECT t.id, t.token_hash, t.client_id, t.user_id, t.project_id, t.scope,
-       t.expires_at, t.revoked_at, t.created_at,
+       t.expires_at, t.revoked_at, t.created_at, t.last_used_at,
        c.name AS client_name
 FROM oauth_access_tokens t
 JOIN oauth_clients c ON c.id = t.client_id
@@ -112,6 +113,7 @@ type ListActiveAccessTokensForUserRow struct {
 	ExpiresAt  pgtype.Timestamptz
 	RevokedAt  pgtype.Timestamptz
 	CreatedAt  pgtype.Timestamptz
+	LastUsedAt pgtype.Timestamptz
 	ClientName string
 }
 
@@ -136,6 +138,7 @@ func (q *Queries) ListActiveAccessTokensForUser(ctx context.Context, userID stri
 			&i.ExpiresAt,
 			&i.RevokedAt,
 			&i.CreatedAt,
+			&i.LastUsedAt,
 			&i.ClientName,
 		); err != nil {
 			return nil, err
@@ -161,4 +164,21 @@ func (q *Queries) RevokeOAuthAccessToken(ctx context.Context, tokenHash string) 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const updateOAuthAccessTokenLastUsed = `-- name: UpdateOAuthAccessTokenLastUsed :exec
+UPDATE oauth_access_tokens
+SET last_used_at = NOW()
+WHERE id = $1
+  AND (last_used_at IS NULL OR last_used_at < NOW() - INTERVAL '60 seconds')
+`
+
+// Stamped fire-and-forget by RequireBearer after every successful bearer
+// lookup. The 60s predicate is the entire throttle: bounds WAL + lock
+// contention once /v1/query and /mcp are hot paths without an extra round
+// trip. Granularity is intentional — the connected-apps UI shows "minutes
+// ago" precision.
+func (q *Queries) UpdateOAuthAccessTokenLastUsed(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, updateOAuthAccessTokenLastUsed, id)
+	return err
 }

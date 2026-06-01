@@ -783,6 +783,13 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 
 **Done when:** `curl` ingests events; events appear in `events_raw_v1`; CH outage survives via DLQ; both-down state surfaces via 503 + log; SIGTERM doesn't lose data.
 
+**Shipped (PR #12, engineering-review deltas):** The build above is the pre-review plan; the live implementation refined it. The historical record is preserved verbatim; what actually landed:
+- **Env renames.** `INGEST_CHANNEL_SIZE` → `INGEST_EVENT_BUFFER` (now an atomic in-flight *event* ceiling, not a channel-slot count; the channel is sized derived from it). `INGEST_SHUTDOWN_GRACE_SEC` → `INGEST_SHUTDOWN_GRACE` (a `time.Duration`, not an int-seconds). New knobs added: `INGEST_MAX_BODY_BYTES` (default 10 MiB) and `INGEST_DLQ_DRAIN_BATCH_LIMIT` (default 10). The Step 10 reference to `INGEST_SHUTDOWN_GRACE_SEC` (drain-timeout note) inherits the same rename.
+- **Fatal-state `Retry-After`.** 5s, not 30s (disabled/kill-switch stays 300s; saturation stays 1s).
+- **Soft-deleted project → 401, not 404.** The ingest-token lookup excludes soft-deleted projects and collapses to the same uniform 401 as an unknown/revoked token, so project existence isn't leaked via status code.
+- **Infra error in token lookup → 500, not "503 generic".** A PG-down lookup is an infrastructure failure surfaced as 500 (distinct from the 503 backpressure used for disabled/fatal/saturation), so an outage doesn't read as a credential-stuffing signal. The 503-only-leaks-no-DB-status intent is preserved — 500 carries a generic body.
+- **`last_used_at` tie-in.** This PR also added `oauth_access_tokens.last_used_at`, stamped fire-and-forget by `RequireBearer` via a 60s-throttled UPDATE — satisfying the Step 4 forward-note (above) that the revoked-tokens / connected-apps work needs.
+
 ### Step 6 — Events MV + read endpoints
 
 **Goal:** `events_v2` MV is populated from `events_raw_v1`; `GET /v1/events` and the web event explorer return data scoped to the bearer-authed project.

@@ -37,6 +37,32 @@ type Config struct {
 	OAuthIssuerURL            string        `env:"OAUTH_ISSUER_URL,required"`
 	OAuthAccessTokenTTL       time.Duration `env:"OAUTH_ACCESS_TOKEN_TTL" envDefault:"1h"`
 	OAuthAuthorizationCodeTTL time.Duration `env:"OAUTH_AUTHORIZATION_CODE_TTL" envDefault:"10m"`
+
+	// Ingest pipeline (Step 5). IngestEventBuffer is the atomic-pending event
+	// ceiling Submit checks against; the underlying channel is sized smaller
+	// because envelopes carry many events each. IngestFlushEvents +
+	// IngestFlushInterval form the per-batch flush trigger (whichever fires
+	// first). IngestShutdownGrace bounds phase 3 of SIGTERM. IngestDisabled
+	// is the kill switch — when true, /v1/ingest 503s immediately without
+	// touching the channel. IngestMaxBodyBytes caps the request body
+	// surface area (10 MiB).
+	IngestEventBuffer        int           `env:"INGEST_EVENT_BUFFER" envDefault:"50000"`
+	IngestFlushEvents        int           `env:"INGEST_FLUSH_EVENTS" envDefault:"5000"`
+	IngestFlushInterval      time.Duration `env:"INGEST_FLUSH_INTERVAL" envDefault:"2s"`
+	IngestShutdownGrace      time.Duration `env:"INGEST_SHUTDOWN_GRACE" envDefault:"10s"`
+	IngestDisabled           bool          `env:"INGEST_DISABLED" envDefault:"false"`
+	IngestMaxBodyBytes       int64         `env:"INGEST_MAX_BODY_BYTES" envDefault:"10485760"`
+	IngestDLQDrainBatchLimit int           `env:"INGEST_DLQ_DRAIN_BATCH_LIMIT" envDefault:"10"`
+
+	// DLQDepth503Threshold is the active failed_events row count above which
+	// /healthz returns 503. Operators page on the resulting kamal-proxy
+	// circuit-break.
+	DLQDepth503Threshold int `env:"DLQ_DEPTH_503_THRESHOLD" envDefault:"100000"`
+
+	// AllowedOrigins restricts the Access-Control-Allow-Origin header on
+	// /v1/ingest. Empty (default) → `*`. Comma-separated list of exact
+	// origins (no wildcards beyond the empty-list case).
+	AllowedOrigins []string `env:"ALLOWED_ORIGINS" envSeparator:"," envDefault:""`
 }
 
 func Load() (Config, error) {
@@ -104,5 +130,14 @@ func (c Config) LogValue() slog.Value {
 		slog.String("oauth_issuer_url", c.OAuthIssuerURL),
 		slog.Duration("oauth_access_token_ttl", c.OAuthAccessTokenTTL),
 		slog.Duration("oauth_authorization_code_ttl", c.OAuthAuthorizationCodeTTL),
+		slog.Int("ingest_event_buffer", c.IngestEventBuffer),
+		slog.Int("ingest_flush_events", c.IngestFlushEvents),
+		slog.Duration("ingest_flush_interval", c.IngestFlushInterval),
+		slog.Duration("ingest_shutdown_grace", c.IngestShutdownGrace),
+		slog.Bool("ingest_disabled", c.IngestDisabled),
+		slog.Int64("ingest_max_body_bytes", c.IngestMaxBodyBytes),
+		slog.Int("ingest_dlq_drain_batch_limit", c.IngestDLQDrainBatchLimit),
+		slog.Int("dlq_depth_503_threshold", c.DLQDepth503Threshold),
+		slog.Any("allowed_origins", c.AllowedOrigins),
 	)
 }

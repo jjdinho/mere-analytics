@@ -9,6 +9,31 @@ import (
 	"context"
 )
 
+const getActiveIngestTokenByHash = `-- name: GetActiveIngestTokenByHash :one
+SELECT t.id, t.project_id
+FROM api_tokens t
+JOIN projects p ON p.id = t.project_id
+WHERE t.token_hash = $1
+  AND t.revoked_at IS NULL
+  AND p.deleted_at IS NULL
+`
+
+type GetActiveIngestTokenByHashRow struct {
+	ID        string
+	ProjectID string
+}
+
+// Resolves a mere_pub_* token hash to its project. Excludes soft-deleted
+// projects so a deleted project can't keep accepting writes. Used by the
+// ingest path's requirePublicToken middleware; the caller has already
+// verified the PublicTokenPrefix so a non-prefix bearer never reaches here.
+func (q *Queries) GetActiveIngestTokenByHash(ctx context.Context, tokenHash string) (GetActiveIngestTokenByHashRow, error) {
+	row := q.db.QueryRow(ctx, getActiveIngestTokenByHash, tokenHash)
+	var i GetActiveIngestTokenByHashRow
+	err := row.Scan(&i.ID, &i.ProjectID)
+	return i, err
+}
+
 const getPublicTokenForProjectForUser = `-- name: GetPublicTokenForProjectForUser :one
 
 SELECT t.id, t.project_id, t.name, t.token_hash, t.created_at, t.revoked_at, t.token_plaintext

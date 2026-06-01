@@ -23,6 +23,8 @@ import (
 const accessTokenRandomBytes = 32
 
 // AccessToken is the application-layer view of an oauth_access_tokens row.
+// ID is the row's UUID — RequireBearer hands it to MarkAccessTokenUsed for
+// the throttled last_used_at stamp.
 type AccessToken struct {
 	ID        string
 	ClientID  string
@@ -69,6 +71,19 @@ func (s *Service) IssueAccessToken(ctx context.Context, p IssueAccessTokenParams
 		return "", time.Time{}, fmt.Errorf("issue access token: insert: %w", err)
 	}
 	return plaintext, expiresAt, nil
+}
+
+// MarkAccessTokenUsed stamps last_used_at on the row identified by id. The
+// underlying UPDATE has a 60s predicate so a hot token only writes the
+// column at most once per minute — this keeps WAL + lock contention bounded
+// once /v1/query and /mcp share the bearer middleware. Called fire-and-forget
+// from RequireBearer on every successful lookup; an error is logged by the
+// caller, never propagated to the request.
+func (s *Service) MarkAccessTokenUsed(ctx context.Context, id string) error {
+	if err := s.queries.UpdateOAuthAccessTokenLastUsed(ctx, id); err != nil {
+		return fmt.Errorf("mark access token used: %w", err)
+	}
+	return nil
 }
 
 // LookupActiveAccessToken resolves a plaintext bearer to its bound identity.
