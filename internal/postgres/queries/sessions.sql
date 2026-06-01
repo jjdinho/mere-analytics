@@ -24,5 +24,8 @@ WHERE id = $1;
 -- name: DeleteSession :exec
 DELETE FROM sessions WHERE id = $1;
 
--- name: DeleteExpiredSessions :exec
+-- name: DeleteExpiredSessions :execrows
+-- Called by cmd/maintenance. The sliding-expiry/hard-cap math runs at touch
+-- time, so a row whose expires_at has passed is permanently inert and safe
+-- to delete.
 DELETE FROM sessions WHERE expires_at < NOW();
