@@ -32,6 +32,13 @@ import (
 	"github.com/jjdinho/mere-analytics/migrations"
 )
 
+// Version is the build-time version stamp, injected via
+// -ldflags="-X main.Version=$(git describe --tags --always --dirty)" by the
+// Dockerfile / CI. It defaults to "dev" for plain `go build` / `go run`. The
+// value is logged on boot and returned in the /healthz JSON body so operators
+// can answer "what's deployed right now?" from `kamal logs` or a probe.
+var Version = "dev"
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
@@ -42,6 +49,8 @@ func main() {
 }
 
 func run(logger *slog.Logger) error {
+	logger.Info("starting mere-server", "version", Version)
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -136,6 +145,7 @@ func run(logger *slog.Logger) error {
 			AuthService:          authSvc,
 			OAuthService:         oauthSvc,
 			OAuthIssuer:          cfg.OAuthIssuerURL,
+			Version:              Version,
 			Logger:               logger,
 			SecureCookies:        cfg.SecureCookies,
 			IngestService:        ingestSvc,

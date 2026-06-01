@@ -16,7 +16,7 @@ func discardLogger() *slog.Logger {
 }
 
 func TestHealthz(t *testing.T) {
-	srv := httptest.NewServer(Handler(Options{Logger: discardLogger()}))
+	srv := httptest.NewServer(Handler(Options{Logger: discardLogger(), Version: "v1.2.3-test"}))
 	t.Cleanup(srv.Close)
 
 	resp, err := http.Get(srv.URL + "/healthz")
@@ -36,6 +36,11 @@ func TestHealthz(t *testing.T) {
 	}
 	if body.Status != "ok" {
 		t.Errorf("status field: got %q want ok", body.Status)
+	}
+	// The build-time version stamp surfaces in /healthz (step 8) so operators
+	// can confirm what's deployed from a probe.
+	if body.Version != "v1.2.3-test" {
+		t.Errorf("version field: got %q want v1.2.3-test", body.Version)
 	}
 	if body.IngestDisabled {
 		t.Error("ingest_disabled: got true want false (no ingest service wired)")

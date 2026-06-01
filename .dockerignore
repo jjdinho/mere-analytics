@@ -4,6 +4,7 @@
 /docker/
 /scripts/
 /docs/
+/config/
 /e2e/
 README.md
 TODOS.md

@@ -1,0 +1,14 @@
+-- Bootstraps the postgres accessory on first startup.
+--
+-- The postgres image runs every *.sql in /docker-entrypoint-initdb.d once, when
+-- the data directory is empty. Kamal mounts this file there (see the postgres
+-- accessory `files:` block in config/deploy.example.yml).
+--
+-- The database and the `mere` role are created by the image from the
+-- POSTGRES_DB / POSTGRES_USER env vars, so we do not CREATE DATABASE here.
+--
+-- pgcrypto is required by the operator scripts (create-user.sql /
+-- reset-password.sql), which hash passwords with crypt()/gen_salt('bf', 10).
+-- App migration 0003 also creates it, but installing it here means the
+-- operator can run `kamal create-user` before the app has booted even once.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;

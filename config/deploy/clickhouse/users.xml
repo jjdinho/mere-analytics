@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse users for the production deploy. Kamal mounts this at
+  /etc/clickhouse-server/users.d/users.xml (see config/deploy.example.yml),
+  where it overrides the image's stock user definitions.
+
+  Source-of-truth decision (plan step 8, option A): this file defines ONLY the
+  admin user. `mere_readonly` is created and kept in sync by the app on every
+  boot (internal/clickhouse.ProvisionReadonlyUser) — a single source of truth
+  avoids the botched-rotation divergence that defining it in two places invites.
+
+  The admin password is NEVER written here in plaintext. ClickHouse substitutes
+  it at startup from the CLICKHOUSE_ADMIN_PASSWORD_SHA256 env var (a sha256 hex
+  digest precomputed in .kamal/secrets and passed to the accessory). See
+  docs/self-host.md for the bootstrap recipe.
+-->
+<clickhouse>
+    <users>
+        <!--
+          Built-in operator account. Reachable only from inside the container
+          (loopback), which is exactly how the `kamal clickhouse-console` alias
+          connects (it `exec`s into the container and runs clickhouse-client
+          against 127.0.0.1). Never used by the app and never exposed on the
+          Docker network. access_management lets the operator manage users by
+          hand if they ever need to.
+        -->
+        <default>
+            <password></password>
+            <networks>
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </default>
+
+        <!--
+          Application admin: runs CH migrations and ingest writes, and provisions
+          mere_readonly on boot (hence access_management). Reachable on the Kamal
+          Docker network so the app container can connect; this is safe because
+          the accessory publishes the native port only to the Docker network
+          (port 9000 is unpublished; 8123 is bound to 127.0.0.1 on the host).
+        -->
+        <mere_admin>
+            <password_sha256_hex from_env="CLICKHOUSE_ADMIN_PASSWORD_SHA256"></password_sha256_hex>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </mere_admin>
+    </users>
+</clickhouse>

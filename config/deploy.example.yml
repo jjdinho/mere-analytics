@@ -1,0 +1,131 @@
+# Kamal deploy template for mere-analytics.
+#
+#   cp config/deploy.example.yml config/deploy.yml
+#
+# then fill in the four <PLACEHOLDERS> below (VPS IP, hostname, registry user).
+# config/deploy.yml is gitignored — it is your machine's copy. Secrets live in
+# .kamal/secrets (also gitignored); see docs/self-host.md for the bootstrap
+# recipe that generates them.
+#
+# One `kamal setup` brings up Postgres + ClickHouse accessories, builds and
+# pushes the app image, boots the container (which auto-runs migrations), and
+# fronts it with kamal-proxy + Let's Encrypt TLS.
+
+service: mere
+image: <GHCR_USERNAME>/mere
+
+servers:
+  web:
+    hosts:
+      - <VPS_IP>
+
+# Published images go to GHCR by default. Self-hosters using Docker Hub or a
+# private registry can change `server` (or drop it for Docker Hub) and `image`.
+registry:
+  server: ghcr.io
+  username: <GHCR_USERNAME>
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+# amd64-only in v1 (decision #17). VERSION is evaluated on the operator's
+# machine at deploy time and baked into the binary via the Dockerfile's
+# ARG VERSION; it surfaces in boot logs and the /healthz body.
+builder:
+  arch: amd64
+  args:
+    VERSION: <%= `git describe --tags --always --dirty`.strip %>
+
+proxy:
+  ssl: true
+  host: <HOSTNAME>
+  app_port: 8080
+  healthcheck:
+    path: /healthz
+    interval: 3
+
+# How long kamal-proxy waits for in-flight requests to drain before stopping the
+# old container on deploy. Kamal's default is already 30s; we set it explicitly
+# because it must exceed the app's SIGTERM budget (HTTP shutdown 10s +
+# INGEST_SHUTDOWN_GRACE 10s) so in-flight ingest finishes. Root-level key in
+# Kamal 2 (not under proxy:). See plan step 5 / step 8.
+drain_timeout: 30
+
+env:
+  clear:
+    PORT: 8080
+    POSTGRES_HOST: mere-postgres
+    POSTGRES_PORT: 5432
+    POSTGRES_DB: mere
+    POSTGRES_USER: mere
+    CLICKHOUSE_HOST: mere-clickhouse
+    CLICKHOUSE_PORT: 9000
+    CLICKHOUSE_DATABASE: analytics
+    CLICKHOUSE_ADMIN_USER: mere_admin
+    CLICKHOUSE_READONLY_USER: mere_readonly
+    # The externally reachable base URL; must match proxy.host. The OAuth server
+    # advertises it in discovery + signs authorization redirects against it.
+    OAUTH_ISSUER_URL: https://<HOSTNAME>
+  secret:
+    - POSTGRES_PASSWORD
+    - CLICKHOUSE_ADMIN_PASSWORD
+    - CLICKHOUSE_READONLY_PASSWORD
+
+accessories:
+  postgres:
+    image: postgres:16
+    host: <VPS_IP>
+    # Bind to host loopback only — the app reaches PG over the Kamal Docker
+    # network, not the public interface.
+    port: "127.0.0.1:5432:5432"
+    env:
+      clear:
+        POSTGRES_DB: mere
+        POSTGRES_USER: mere
+      secret:
+        - POSTGRES_PASSWORD
+    directories:
+      - /data/mere/postgres:/var/lib/postgresql/data
+    files:
+      # init.sql installs pgcrypto on first start; the operator scripts back the
+      # create-user / reset-password aliases below.
+      - config/deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - scripts/operator/create-user.sql:/operator/create-user.sql
+      - scripts/operator/reset-password.sql:/operator/reset-password.sql
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12
+    host: <VPS_IP>
+    # Only the HTTP port is published, to host loopback; the native port (9000)
+    # the app uses stays on the Docker network.
+    port: "127.0.0.1:8123:8123"
+    env:
+      clear:
+        CLICKHOUSE_DB: analytics
+      secret:
+        # sha256 hex digest of CLICKHOUSE_ADMIN_PASSWORD; users.xml reads it via
+        # from_env so the plaintext admin password never reaches the CH server.
+        - CLICKHOUSE_ADMIN_PASSWORD_SHA256
+    directories:
+      - /data/mere/clickhouse/data:/var/lib/clickhouse
+      - /data/mere/clickhouse/logs:/var/log/clickhouse-server
+    files:
+      - config/deploy/clickhouse/users.xml:/etc/clickhouse-server/users.d/users.xml
+      - config/deploy/clickhouse/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - scripts/operator/wipe-project.sql:/operator/wipe-project.sql
+    options:
+      ulimit: "nofile=262144:262144"
+
+# Operator actions that can't be done through the web UI or HTTP API. Each
+# execs into an accessory and runs a parameterised SQL script. Invoke with the
+# named env vars set, e.g.:
+#   EMAIL=admin@example.com INITIAL_PASSWORD=change-me-please kamal create-user
+#   EMAIL=user@example.com  NEW_PASSWORD=change-me-please     kamal reset-password
+#   PROJECT_ID=01HX... kamal wipe-project
+aliases:
+  create-user:        accessory exec postgres -i "psql -U $POSTGRES_USER -d $POSTGRES_DB -v email=$EMAIL -v password=$INITIAL_PASSWORD -f /operator/create-user.sql"
+  reset-password:     accessory exec postgres -i "psql -U $POSTGRES_USER -d $POSTGRES_DB -v email=$EMAIL -v password=$NEW_PASSWORD -f /operator/reset-password.sql"
+  wipe-project:       accessory exec clickhouse -i "clickhouse-client --param_project_id=$PROJECT_ID --queries-file /operator/wipe-project.sql"
+  db-console:         accessory exec postgres -i "psql -U $POSTGRES_USER -d $POSTGRES_DB"
+  clickhouse-console: accessory exec clickhouse -i "clickhouse-client"
+  console:            app exec --interactive --reuse "sh"
+  logs:               app logs -f
