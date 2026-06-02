@@ -69,7 +69,15 @@ the environment reference, operator actions, backups, and migration recovery.
 - **[docs/self-host.md](docs/self-host.md)** — how to run it in production.
 - **[docs/architecture.md](docs/architecture.md)** — how it's built and why.
 - **[docs/plan.md](docs/plan.md)** — the design plan and decision log.
+- **[docs/adr/](docs/adr/)** — architecture decision records (licensing,
+  open-core, the extension-seam contract).
 
 ## License
 
-Apache 2.0.
+[AGPL-3.0-or-later](LICENSE). Self-host, modify, and run mere freely — a
+self-hoster's rights are unrestricted. The network-copyleft (AGPL §13) means
+anyone who offers a **modified** mere as a network service must share their
+modifications. A separately-run hosted version is offered for those who'd rather
+not operate it themselves. The licensing and open-core rationale are recorded in
+[ADR-0001](docs/adr/0001-adopt-agpl-3.0.md) and
+[ADR-0002](docs/adr/0002-open-core-hosted-wrapper.md).

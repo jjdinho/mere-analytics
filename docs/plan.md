@@ -17,7 +17,7 @@ Self-hosters get the full product. No "cloud-only" features in this repo.
 
 - **No SDK.** The browser snippet lives in a different repo.
 - **No CLI.** Lives in a different repo.
-- **No SaaS overlay.** No billing, no per-tenant query budgets, no multi-region routing, no rate limiting. The deployer owns ops.
+- **No SaaS overlay.** No billing, no per-tenant query budgets, no multi-region routing, no rate limiting *logic*. The deployer owns ops. (The repo does ship generic, **no-op** extension *seams* — `RateLimiter`, `UsageSink` — that a separate hosted wrapper implements; the core's behavior is unchanged by them. See [ADR-0002](adr/0002-open-core-hosted-wrapper.md).)
 - **No agent / no LLM.** Agents are consumers of the API, not part of it.
 - **No admin role.** Every account is a regular user scoped to projects they own or are invited to. The deployer (with shell access to the server) is the "operator" — that's external to the app, not an app role.
 - **No dashboards, signals, recordings, triggers, smart events, page catalog, third-party integrations.** Consumers build these on top.
@@ -81,7 +81,7 @@ One binary, two databases. No worker process in v1 — async work runs as gorout
 | Templating | `templ` (compiled Go templates) |
 | Frontend interactivity | htmx |
 | MCP server | `github.com/mark3labs/mcp-go` |
-| OSS license | Apache 2.0 |
+| OSS license | AGPL-3.0-or-later (see [ADR-0001](adr/0001-adopt-agpl-3.0.md)) |
 
 ### Open (recommendations marked)
 
@@ -948,6 +948,9 @@ The only thing given up is that a third-party self-hoster builds their own image
 | 17 | Image arch + CI publishing? | **amd64-only, build-with-kamal, no CI publishing.** Deploys are manual `kamal deploy` (session_vision model): Kamal builds the amd64 image on the operator's machine and pushes to their own registry. No GitHub Actions pipeline publishes images; arm64 deferred until requested. Pre-built public release images can be added later if anyone asks. (Step 9 dropped 2026-06-02.) |
 | 18 | Backup strategy? | **Hetzner automated backups** by default (block-level disk snapshots, enabled in Hetzner Console). Self-hosters on other providers run `pg_dump` + `clickhouse-backup` themselves — example scripts in `docs/self-host.md`. No built-in accessory in v1. |
 | 19 | Public API path layout? | **Everything under `/api/v1/`, planes split by auth not prefix.** Ingest is `POST /api/v1/ingest/events` (public `mere_pub_` token); reads are `/api/v1/projects/:id/query` + `/schema` and `/mcp` (OAuth bearer); the bearer smoke endpoint is `/api/v1/whoami`. The draft proposed a separate `/ingest/v1/*` namespace and the first cut shipped `/v1/ingest`; consolidated to a single versioned `/api/v1/` prefix during step 10. |
+| 20 | OSS license? | **AGPL-3.0-or-later** (was Apache 2.0). Network-copyleft deters a proprietary competing fork while keeping mere genuinely open + fully self-hostable; we retain copyright so we can dual-license into our own hosted build. Full reasoning + the CLA consequence in [ADR-0001](adr/0001-adopt-agpl-3.0.md). |
+| 21 | How does the paid hosted version relate to this repo? | **Open-core: the hosted layer is a separate private wrapper around an unmodified core, never a fork.** The core exposes two no-op extension seams (`RateLimiter`, `UsageSink`); all other hosted concerns (signup, billing, provisioning) live in a separate control-plane process. Full design + the seam contract in [ADR-0002](adr/0002-open-core-hosted-wrapper.md); per-seam build plans in [docs/plans/](plans/). |
+| 22 | How does a separate module build + start the app without a fork? | **Expose one importable `app` composition package; keep everything else `internal/`.** The wrapper depends only on `app` (build/run) + `extension` (seam types). `cmd/server/main.go` becomes a thin shim; the boot sequence + SIGTERM choreography move into `app`. Behavior-preserving refactor. See [ADR-0003](adr/0003-importable-app-composition-root.md). |
 
 ## Remaining open questions
 
