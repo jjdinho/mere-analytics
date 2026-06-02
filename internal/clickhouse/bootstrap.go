@@ -32,6 +32,7 @@ func CreateDatabase(ctx context.Context, cfg config.Config) error {
 //	CREATE USER IF NOT EXISTS <user> IDENTIFIED ... SETTINGS readonly=2
 //	ALTER  USER             <user> IDENTIFIED ... SETTINGS readonly=2 -- forces pw/settings
 //	GRANT  SELECT ON <db>.* TO <user>                                 -- idempotent
+//	CREATE ROW POLICY OR REPLACE ... ON system.tables USING 0 TO <user>
 //
 // Eliminates silent divergence if a pre-existing user has wrong password,
 // readonly setting, or grants (review finding 2.1 / decision 5).
@@ -39,15 +40,25 @@ func CreateDatabase(ctx context.Context, cfg config.Config) error {
 // readonly=2 keeps DDL/DML blocked but allows the app to attach per-request
 // SELECT settings such as additional_table_filters, max_result_rows, and
 // max_execution_time. The built-in readonly profile is too strict for Step 6.
+//
+// system.tables is in ClickHouse's hardcoded always-accessible allowlist, so it
+// cannot be revoked or gated by select_from_system_db_requires_grant. Its
+// total_rows/total_bytes columns expose global counts across every project — a
+// cross-tenant aggregate leak. A USING 0 row policy hides all of its rows from
+// the readonly user; unlike an app-layer SQL blocklist it can't be bypassed by
+// SELECT * or quoted identifiers. Schema introspection uses DESCRIBE, not
+// system.tables, so it is unaffected.
 func ProvisionReadonlyUser(ctx context.Context, db *sql.DB, cfg config.Config) error {
 	user := quoteIdent(cfg.ClickHouseReadonlyUser)
 	pw := quoteString(cfg.ClickHouseReadonlyPassword)
 	dbName := quoteIdent(cfg.ClickHouseDatabase)
+	policy := quoteIdent(cfg.ClickHouseReadonlyUser + "_hide_system_tables")
 
 	stmts := []string{
 		fmt.Sprintf("CREATE USER IF NOT EXISTS %s IDENTIFIED WITH sha256_password BY %s SETTINGS readonly=2", user, pw),
 		fmt.Sprintf("ALTER USER %s IDENTIFIED WITH sha256_password BY %s SETTINGS readonly=2", user, pw),
 		fmt.Sprintf("GRANT SELECT ON %s.* TO %s", dbName, user),
+		fmt.Sprintf("CREATE ROW POLICY OR REPLACE %s ON system.tables USING 0 TO %s", policy, user),
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

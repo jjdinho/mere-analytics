@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +33,22 @@ var (
 	// ErrRowLimitExceeded is used by the web playground sink to stop rendering
 	// before a huge result set is buffered in memory.
 	ErrRowLimitExceeded = errors.New("row limit exceeded")
+
+	// ErrSettingsNotAllowed is returned when user SQL carries its own SETTINGS
+	// clause. The readonly user runs with readonly=2 so the app can attach
+	// per-request settings (additional_table_filters, resource limits); that
+	// same mode lets a user-supplied SETTINGS clause OVERRIDE those settings,
+	// including the tenant-isolation filter. We reject such queries rather than
+	// let a query silently widen its own scope. Query settings are the server's
+	// to control, not the caller's.
+	ErrSettingsNotAllowed = errors.New("SETTINGS clause is not allowed in queries")
 )
+
+// settingsKeyword matches a SETTINGS clause keyword as a standalone token.
+// Applied to SQL whose string literals, identifiers, and comments have been
+// masked, so it only fires on a real clause — not on an event named
+// 'Settings Opened' or a column called settings.
+var settingsKeyword = regexp.MustCompile(`(?i)\bsettings\b`)
 
 // Querier is the subset of *sql.DB the executor needs. Tests use it to assert
 // the original request context reaches the ClickHouse driver call.
@@ -143,6 +159,9 @@ func (e *Executor) Collect(ctx context.Context, projectID, sqlText string, maxRo
 func (e *Executor) run(ctx context.Context, projectID, sqlText string, sink sink) (Stats, error) {
 	if strings.TrimSpace(sqlText) == "" {
 		return Stats{}, ErrEmptySQL
+	}
+	if containsSettingsClause(sqlText) {
+		return Stats{}, ErrSettingsNotAllowed
 	}
 	start := time.Now()
 	rows, err := e.db.QueryContext(e.contextWithSettings(ctx, projectID), sqlText)
@@ -326,6 +345,72 @@ func formatUUID(b []byte) string {
 		sb.WriteString(strconv.FormatUint(uint64(c&0x0f), 16))
 	}
 	return sb.String()
+}
+
+// containsSettingsClause reports whether sqlText carries a SETTINGS clause.
+// It masks string literals, quoted identifiers, and comments to spaces first,
+// so the keyword check can't be fooled by data (e.g. `event = 'Settings'`) and
+// won't reject legitimate analytics queries that merely mention the word.
+func containsSettingsClause(sqlText string) bool {
+	return settingsKeyword.MatchString(maskLiteralsAndComments(sqlText))
+}
+
+// maskLiteralsAndComments returns sqlText with the bytes inside single-quoted
+// strings, double-quoted and backtick-quoted identifiers, line comments (--),
+// and block comments (/* */) replaced by spaces. It is a lexical scrubber, not
+// a parser: positions are preserved and only delimiters/keywords survive, which
+// is all containsSettingsClause needs. Unterminated literals mask to end of
+// input (fail-closed).
+func maskLiteralsAndComments(sqlText string) string {
+	var b strings.Builder
+	b.Grow(len(sqlText))
+	for i := 0; i < len(sqlText); {
+		c := sqlText[i]
+		switch {
+		case c == '\'' || c == '"' || c == '`':
+			quote := c
+			b.WriteByte(' ')
+			i++
+			for i < len(sqlText) {
+				if sqlText[i] == '\\' && i+1 < len(sqlText) { // C-style escape
+					b.WriteString("  ")
+					i += 2
+					continue
+				}
+				if sqlText[i] == quote {
+					if i+1 < len(sqlText) && sqlText[i+1] == quote { // doubled-quote escape
+						b.WriteString("  ")
+						i += 2
+						continue
+					}
+					b.WriteByte(' ')
+					i++
+					break
+				}
+				b.WriteByte(' ')
+				i++
+			}
+		case c == '-' && i+1 < len(sqlText) && sqlText[i+1] == '-':
+			for i < len(sqlText) && sqlText[i] != '\n' {
+				b.WriteByte(' ')
+				i++
+			}
+		case c == '/' && i+1 < len(sqlText) && sqlText[i+1] == '*':
+			for i < len(sqlText) {
+				if sqlText[i] == '*' && i+1 < len(sqlText) && sqlText[i+1] == '/' {
+					b.WriteString("  ")
+					i += 2
+					break
+				}
+				b.WriteByte(' ')
+				i++
+			}
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
 }
 
 func quoteIdent(s string) string {
