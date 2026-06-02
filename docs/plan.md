@@ -39,8 +39,8 @@ Self-hosters get the full product. No "cloud-only" features in this repo.
 │  ┌────────────────────┐    ┌───────────────────────────┐   │
 │  │   Public API       │    │   Web UI                  │   │
 │  │   (JSON)           │    │   (htmx + templ)          │   │
-│  │   - /ingest/v1/*   │    │   - signup / login        │   │
-│  │   - /api/v1/       │    │                           │   │
+│  │   - /api/v1/       │    │   - signup / login        │   │
+│  │     ingest/events  │    │                           │   │
 │  │     projects/*     │    │   - query playground      │   │
 │  │   - /mcp           │    │                           │   │
 │  └─────────┬──────────┘    └────────────┬──────────────┘   │
@@ -112,7 +112,7 @@ One binary, two databases. No worker process in v1 — async work runs as gorout
   /query/                   # query executor: attaches additional_table_filters per request
   /events/                  # read-side: list events, sessions, persons, groups
   /mcp/                     # MCP endpoint + tool definitions
-  /web/                     # web UI + OAuth handlers (login, projects, /oauth/*, /v1/whoami)
+  /web/                     # web UI + OAuth handlers (login, projects, /oauth/*, /api/v1/whoami)
   /auth/                    # sessions, public ingest token, password hashing
   /oauth/                   # OAuth 2.1 server: codes, access tokens, PKCE, client registry
   /clickhouse/              # CH client (admin + readonly pools), schema bootstrap
@@ -157,7 +157,7 @@ There is no operator CLI. Operator-only actions (password reset, project wipe, e
 | `teams` | a team owns one or more projects; every user has at least one (auto-created on signup) |
 | `team_memberships` | user ↔ team; no role distinction in v1 (all members equal) |
 | `projects` | scoped to a team; soft-deletable (`deleted_at` column) |
-| `api_tokens` | scoped to a project; public ingest token (`mere_pub_…`) for `/ingest/v1/events` |
+| `api_tokens` | scoped to a project; public ingest token (`mere_pub_…`) for `/api/v1/ingest/events` |
 | `oauth_clients` | OAuth client registry (RFC 7591 dynamic registration) |
 | `oauth_codes` | short-lived (10 min) PKCE authorization codes; one-shot |
 | `oauth_access_tokens` | 1-hour bearer tokens for `/api/v1/* + /mcp`, scoped to (user, project) |
@@ -201,12 +201,12 @@ This buffers small inserts ClickHouse-side and flushes in larger batches, reduci
 
 ## Public API
 
-The API has two planes. Public ingest lives under `/ingest/v1/*` and resolves the project from the public `mere_pub_` snippet token in `api_tokens`, since the snippet lives in client HTML. Private read/control endpoints live under `/api/v1/*`, use OAuth bearer tokens issued by the in-process OAuth 2.1 server at `/oauth/*`, and include the project ID in the URL.
+The API has two planes, distinguished by authentication rather than path prefix — everything lives under `/api/v1/*`. **Public ingest** (`POST /api/v1/ingest/events`) resolves the project from the public `mere_pub_` snippet token in `api_tokens`, since the snippet lives in client HTML. **Private read/control** endpoints (`/api/v1/projects/:project_id/*`, `/mcp`) use OAuth bearer tokens issued by the in-process OAuth 2.1 server at `/oauth/*`, and include the project ID in the URL.
 
 **Soft-deleted projects return `404 Not Found` on every `/api/v1/projects/:project_id/*` endpoint** — the API behaves exactly as if the project never existed. Underlying ClickHouse data is retained until an operator runs `kamal wipe-project`, so a deletion can be undone via direct SQL up to that point. Public ingest tokens for soft-deleted projects return the same uniform auth failure as unknown/revoked tokens.
 
 ```
-POST  /ingest/v1/events                    # batch events (1..N per request), project from public ingest token
+POST  /api/v1/ingest/events                # batch events (1..N per request), project from public ingest token
 POST  /api/v1/projects/:project_id/query   # SQL passthrough, project-scoped by URL + OAuth grant
 GET   /api/v1/projects/:project_id/schema  # queryable table/column metadata for this project
 GET   /mcp                                 # MCP endpoint — tools wrap query + schema
@@ -242,7 +242,7 @@ That's the whole UI. CodeMirror or Monaco gets dropped into the query page only 
 ## Auth
 
 - **Web UI:** session cookie (HttpOnly, SameSite=Lax), backed by `sessions` table.
-- **`/ingest/v1/events`:** project-scoped public token (`mere_pub_…`) in `api_tokens`. Auto-provisioned at project create; non-secret by design (lives in client HTML). The project is resolved from the token, never from a URL path parameter.
+- **`/api/v1/ingest/events`:** project-scoped public token (`mere_pub_…`) in `api_tokens`. Auto-provisioned at project create; non-secret by design (lives in client HTML). The project is resolved from the token, never from a URL path parameter.
 - **`/api/v1/* + /mcp`:** OAuth 2.1 access tokens (PKCE-only authorization-code flow). Stored hashed (sha256) in `oauth_access_tokens`; 1-hour TTL; one project per grant chosen at consent. Server lives in-process at `/oauth/{register,authorize,token}` with RFC 8414 discovery at `/.well-known/oauth-authorization-server`. No refresh tokens — re-authorize on expiry. Implementation in `internal/oauth/`.
 - **No in-app password reset in v1.** Operators reset via the `kamal reset-password` alias (see "Operator actions"), which executes a SQL `UPDATE` against the `postgres` accessory using `pgcrypto`'s `crypt(..., gen_salt('bf', 10))`. Go's `bcrypt` and `pgcrypto`'s `bf` hashes are wire-compatible (both produce standard `$2a$` format), so the user logs in normally afterwards. The user is forced to change the password on next login.
 
@@ -278,7 +278,7 @@ Sanity-check tests for step 6:
 
 ## Ingest reliability
 
-Each `POST /ingest/v1/events` request:
+Each `POST /api/v1/ingest/events` request:
 
 1. Parses + validates the batch (per "Ingest validation" above).
 2. Pushes events onto an in-memory channel.
@@ -534,7 +534,7 @@ Structure mirrors session_vision: `default` user restricted to `127.0.0.1`, `mer
 
 ### Image registry
 
-Published images go to **GHCR** (`ghcr.io/<org>/mere:vX.Y.Z`), public, no auth for pull. CI publishes **amd64-only** on every git tag in v1; arm64 added later if anyone asks. The deploy.yml template defaults to GHCR; self-hosters can override to push from their own machine to their own registry for air-gapped deploys.
+Each operator builds and pushes their **own** image via `kamal deploy` (amd64-only in v1; arm64 added later if anyone asks). The `deploy.example.yml` template targets GHCR by default (`ghcr.io/<username>/mere`); self-hosters can override `registry.server` + `image` to push to Docker Hub or a private registry. No CI publishes official pre-built images in v1 — see decision #17.
 
 ### Backups
 
@@ -725,7 +725,7 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 
 ### Step 5 — Ingest
 
-**Goal:** `curl POST /ingest/v1/events` lands events in `events_raw_v1`. Survives transient CH outages via DLQ; surfaces both-down state loudly.
+**Goal:** `curl POST /api/v1/ingest/events` lands events in `events_raw_v1`. Survives transient CH outages via DLQ; surfaces both-down state loudly.
 
 **Implement per:** [Ingest validation](#ingest-validation) + [Ingest reliability](#ingest-reliability).
 
@@ -743,13 +743,13 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 - `/internal/web/ingest_handlers.go` — public ingest-token auth, check fatal-state + ingest-disabled flags, body limit 10MB.
 
 **Decisions for this step:**
-- **Cascade fatal-state flag.** When CH write AND `failed_events` insert both fail in the same flush, set a process-level flag. While set: `/ingest/v1/events` returns 503 + `Retry-After:30`; channel stops accepting new events; `/healthz` also returns 503. Flusher loops with backoff; first successful CH or PG write clears the flag. Honors "never silently drop" — producer keeps retrying, no 202 it doesn't deserve.
+- **Cascade fatal-state flag.** When CH write AND `failed_events` insert both fail in the same flush, set a process-level flag. While set: `/api/v1/ingest/events` returns 503 + `Retry-After:30`; channel stops accepting new events; `/healthz` also returns 503. Flusher loops with backoff; first successful CH or PG write clears the flag. Honors "never silently drop" — producer keeps retrying, no 202 it doesn't deserve.
 - **Poison-pill quarantine.** DLQ rows quarantine after 20 retry attempts OR 24h age. Drain skips quarantined rows. WARN log with row IDs on quarantine; recovery is a manual SQL UPDATE.
 - **DLQ depth observability.** Drain loop logs depth (INFO baseline, WARN >100, ERROR >10k). `/healthz` returns 503 when depth exceeds env-configured ceiling (default `DLQ_DEPTH_503_THRESHOLD=100000`).
-- **`INGEST_DISABLED` kill switch.** When env set, `/ingest/v1/events` returns 503 + `Retry-After:300`; query/schema and web UI continue. Boot log + periodic WARN every 5 min while disabled; `/healthz` JSON body reports the flag. Operator workflow: `kamal env set INGEST_DISABLED=1 && kamal app restart`.
-- **Per-route `MaxBody`.** `/ingest/v1/events` = 10MB, `/api/v1/projects/:project_id/query` = 256KB, web form POSTs = 64KB. 413 on exceed.
-- **CORS** on `/ingest/v1/*`, `/api/v1/*`, and `/mcp`: `Access-Control-Allow-Origin: *` default; `Allow-Methods: GET,POST,OPTIONS`; `Allow-Headers: Authorization,Content-Type`. Optional env `ALLOWED_ORIGINS=https://app.example.com,...` to restrict. Web UI routes set no CORS headers (same-origin enforced by browser).
-- **SIGTERM choreography.** (1) Close `/ingest/v1/events` (returns 503 for new requests); (2) HTTP server begins shutdown; (3) flusher gets up to env `INGEST_SHUTDOWN_GRACE_SEC` (default 10s) to drain channel to CH; (4) residual events written to `failed_events` as one batch; (5) exit. Coordinates with kamal-proxy `drain_timeout=30s` (set in step 8's `deploy.yml`).
+- **`INGEST_DISABLED` kill switch.** When env set, `/api/v1/ingest/events` returns 503 + `Retry-After:300`; query/schema and web UI continue. Boot log + periodic WARN every 5 min while disabled; `/healthz` JSON body reports the flag. Operator workflow: `kamal env set INGEST_DISABLED=1 && kamal app restart`.
+- **Per-route `MaxBody`.** `/api/v1/ingest/events` = 10MB, `/api/v1/projects/:project_id/query` = 256KB, web form POSTs = 64KB. 413 on exceed.
+- **CORS** on `/api/v1/ingest/events`, `/api/v1/*`, and `/mcp`: `Access-Control-Allow-Origin: *` default; `Allow-Methods: GET,POST,OPTIONS`; `Allow-Headers: Authorization,Content-Type`. Optional env `ALLOWED_ORIGINS=https://app.example.com,...` to restrict. Web UI routes set no CORS headers (same-origin enforced by browser).
+- **SIGTERM choreography.** (1) Close `/api/v1/ingest/events` (returns 503 for new requests); (2) HTTP server begins shutdown; (3) flusher gets up to env `INGEST_SHUTDOWN_GRACE_SEC` (default 10s) to drain channel to CH; (4) residual events written to `failed_events` as one batch; (5) exit. Coordinates with kamal-proxy `drain_timeout=30s` (set in step 8's `deploy.yml`).
 - **Concurrency primitives.** `sync.Once` for flusher startup; `chan struct{}` for shutdown signaling; `atomic.Bool` for fatal-state and ingest-disabled flags. Avoid mutexes on the hot path.
 - **Connection pool sizing.** pgx default is `max_conns = max(4, runtime.NumCPU()*4)`; clickhouse-go defaults to 10. Tune both during this step against realistic ingest concurrency.
 - **Edge cases:** Empty batch `{"events": []}` → 200 `{accepted: 0}`, not 400. DB error in bearer/project lookup → 503 generic (don't leak DB status).
@@ -759,10 +759,10 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 **Tests:**
 - Unit: validator (required fields, optional fields, extras stored verbatim, per-event errors in a batch).
 - Integration: ingest a batch → rows in `events_raw_v1`; bad project token → 401; soft-deleted project → 404; empty batch → 200; oversized body → 413.
-- Chaos: stop CH mid-test → batch lands in `failed_events`; restart CH → DLQ drain succeeds; stop both CH + PG → fatal-state flag → `/ingest/v1/events` 503 + `/healthz` 503; restart CH → flag clears; inject a row that always fails CH insert → quarantined after 20 attempts.
+- Chaos: stop CH mid-test → batch lands in `failed_events`; restart CH → DLQ drain succeeds; stop both CH + PG → fatal-state flag → `/api/v1/ingest/events` 503 + `/healthz` 503; restart CH → flag clears; inject a row that always fails CH insert → quarantined after 20 attempts.
 - Saturation: fill channel to `N+1` → 503 + `Retry-After`.
 - SIGTERM: send 1000 events, SIGTERM immediately → zero data loss (some in CH, rest in `failed_events`).
-- `INGEST_DISABLED`: set env → `/ingest/v1/events` 503; query/schema unaffected.
+- `INGEST_DISABLED`: set env → `/api/v1/ingest/events` 503; query/schema unaffected.
 
 **Done when:** `curl` ingests events; events appear in `events_raw_v1`; CH outage survives via DLQ; both-down state surfaces via 503 + log; SIGTERM doesn't lose data.
 
@@ -882,7 +882,7 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 - **Operator alias surface:** `reset-password`, `wipe-project`, `db-console`, `clickhouse-console`, plus kamal-default `console` and `logs`. No additional aliases in v1.
 
 **Tests:**
-- Manual on a fresh Hetzner VPS: `kamal setup` from zero → TLS → `POST /ingest/v1/events` → `POST /api/v1/projects/:project_id/query` + `GET /api/v1/projects/:project_id/schema` → `kamal deploy` an upgrade with zero downtime → verify ingest + query unaffected during the swap.
+- Manual on a fresh Hetzner VPS: `kamal setup` from zero → TLS → `POST /api/v1/ingest/events` → `POST /api/v1/projects/:project_id/query` + `GET /api/v1/projects/:project_id/schema` → `kamal deploy` an upgrade with zero downtime → verify ingest + query unaffected during the swap.
 - Migration auto-run on container restart: deploy with a no-op new migration; observe it applied on boot.
 
 **Done when:** A fresh VPS reaches working state via `kamal setup` in under 10 min.
@@ -903,28 +903,18 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 - **`config/` added to `.dockerignore`** (deploy-only; mounted into accessories, never baked into the app image), matching the existing `/scripts/` + `/docs/` excludes.
 - **Deferred per plan:** broken-migration recovery recipes and the backups/`pg_dump`/`clickhouse-backup` examples live in `docs/self-host.md` (Step 10). The end-to-end fresh-VPS `kamal setup` run is a manual test (no Hetzner VPS in CI); migration auto-run on container restart is already covered by the Step 5 container-restart tests (PR #13).
 
-### Step 9 — CI image publishing
+### Step 9 — CI image publishing [DROPPED]
 
-**Goal:** `ghcr.io/<org>/mere:vX.Y.Z` exists shortly after `git tag v0.1.0 && git push --tags`.
+**Dropped 2026-06-02.** Deploys are manual `kamal deploy` from the operator's machine (the session_vision model): Kamal builds the amd64 image locally per `builder:` in `deploy.example.yml`, pushes it to the operator's own registry, and rolls it out zero-downtime. No CI pipeline builds or publishes images.
 
-**Files:**
-- `.github/workflows/release.yml` — builds amd64 image, pushes to GHCR public on tag push.
-
-**Decisions for this step:**
-- **amd64-only in v1.** arm64 deferred until requested. Saves CI matrix + build time.
-- **Public images on GHCR**; no auth required for pull.
-
-**Tests:**
-- Tag a pre-release (`v0.0.1-pre.1`); verify the image lands at the expected GHCR path; verify `docker pull` works without auth.
-
-**Done when:** A tagged release produces a public image within a few minutes.
+The only thing given up is that a third-party self-hoster builds their own image on first `kamal deploy` (a one-time, couple-of-minutes build) instead of pulling a ready-made release image. That's an acceptable v1 trade — strictly simpler, and it matches how session_vision deploys today. Pre-built public release images can be added later if anyone asks. See decision #17.
 
 ### Step 10 — Docs + self-host guide
 
 **Goal:** Someone else can stand it up from scratch without help.
 
 **Files:**
-- `docs/api.md` — public API reference (every `/ingest/v1/*` and `/api/v1/*` endpoint, MCP tools, error shapes).
+- `docs/api.md` — public API reference (every `/api/v1/*` endpoint, MCP tools, error shapes).
 - `docs/self-host.md` — the "from zero" workflow above, expanded; includes the broken-migration recovery recipes (from step 8's decision); includes the backward-compatible-migration convention (see TODOS.md); includes example `pg_dump` + `clickhouse-backup` scripts for non-Hetzner deployers.
 - `README.md` — pitch, quickstart, link to `self-host.md`.
 - `docs/architecture.md` — written once the design has stabilized through implementation.
@@ -955,8 +945,9 @@ Shipped after step 4. Removes the public `/signup` route; the first user is crea
 | 14 | Team invite flow? | **Invite-by-link.** One-shot token, 7-day TTL, generated from team settings. Inviter shares the URL out-of-band; recipient signs up (or logs in) and joins. |
 | 15 | Operator alias surface in v1? | **The five listed:** `create-user`, `reset-password`, `wipe-project`, `db-console`, `clickhouse-console` — plus Kamal-default `console` and `logs`. `create-user` exists because there's no public signup; further user management still happens in the web UI via invite links. |
 | 16 | `audit_log` in v1? | **Skip.** Add when an operator asks for it. Not in the Postgres schema. |
-| 17 | Image arch in CI? | **amd64 only in v1.** arm64 added when someone asks; saves CI matrix + build time now. |
+| 17 | Image arch + CI publishing? | **amd64-only, build-with-kamal, no CI publishing.** Deploys are manual `kamal deploy` (session_vision model): Kamal builds the amd64 image on the operator's machine and pushes to their own registry. No GitHub Actions pipeline publishes images; arm64 deferred until requested. Pre-built public release images can be added later if anyone asks. (Step 9 dropped 2026-06-02.) |
 | 18 | Backup strategy? | **Hetzner automated backups** by default (block-level disk snapshots, enabled in Hetzner Console). Self-hosters on other providers run `pg_dump` + `clickhouse-backup` themselves — example scripts in `docs/self-host.md`. No built-in accessory in v1. |
+| 19 | Public API path layout? | **Everything under `/api/v1/`, planes split by auth not prefix.** Ingest is `POST /api/v1/ingest/events` (public `mere_pub_` token); reads are `/api/v1/projects/:id/query` + `/schema` and `/mcp` (OAuth bearer); the bearer smoke endpoint is `/api/v1/whoami`. The draft proposed a separate `/ingest/v1/*` namespace and the first cut shipped `/v1/ingest`; consolidated to a single versioned `/api/v1/` prefix during step 10. |
 
 ## Remaining open questions
 

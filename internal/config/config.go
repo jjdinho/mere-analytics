@@ -43,7 +43,7 @@ type Config struct {
 	// because envelopes carry many events each. IngestFlushEvents +
 	// IngestFlushInterval form the per-batch flush trigger (whichever fires
 	// first). IngestShutdownGrace bounds phase 3 of SIGTERM. IngestDisabled
-	// is the kill switch — when true, /v1/ingest 503s immediately without
+	// is the kill switch — when true, /api/v1/ingest/events 503s immediately without
 	// touching the channel. IngestMaxBodyBytes caps the request body
 	// surface area (10 MiB).
 	IngestEventBuffer        int           `env:"INGEST_EVENT_BUFFER" envDefault:"50000"`
@@ -60,7 +60,7 @@ type Config struct {
 	DLQDepth503Threshold int `env:"DLQ_DEPTH_503_THRESHOLD" envDefault:"100000"`
 
 	// AllowedOrigins restricts the Access-Control-Allow-Origin header on
-	// /v1/ingest and bearer API routes. Empty (default) → `*`. Comma-separated
+	// /api/v1/ingest/events and bearer API routes. Empty (default) → `*`. Comma-separated
 	// list of exact origins (no wildcards beyond the empty-list case).
 	AllowedOrigins []string `env:"ALLOWED_ORIGINS" envSeparator:"," envDefault:""`
 

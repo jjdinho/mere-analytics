@@ -1,4 +1,4 @@
-// Package ingest implements the analytics write path: POST /v1/ingest →
+// Package ingest implements the analytics write path: POST /api/v1/ingest/events →
 // validated batch → in-memory channel → flusher → ClickHouse events_raw_v1.
 //
 // Pipeline:
@@ -37,14 +37,15 @@
 //	                  age ≥ 24h         ──► QuarantineFailedEvent
 //	    After pass: Flags.SetDLQDepth(CountActiveFailedEvents)
 //
-// Token paths stay strictly separate. /v1/ingest uses LookupIngestToken
-// against api_tokens (mere_pub_…); /v1/whoami + future /v1/query + /mcp use
+// Token paths stay strictly separate. /api/v1/ingest/events uses LookupIngestToken
+// against api_tokens (mere_pub_…); /api/v1/whoami, /api/v1/projects/*, and /mcp use
 // oauth.Service.LookupActiveAccessToken against oauth_access_tokens. The
 // two surfaces share no code, and the OAuth path rejects mere_pub_ at the
 // prefix step.
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -74,6 +75,101 @@ type Event struct {
 	SessionID  *string         `json:"session_id,omitempty"`
 	Properties json.RawMessage `json:"properties,omitempty"`
 	Extras     json.RawMessage `json:"extras,omitempty"`
+}
+
+// UnmarshalJSON decodes an event with the "strict on required, lenient on
+// extras" contract: event, timestamp, distinct_id, session_id, and properties
+// are first-class; every other top-level field is folded verbatim into extras,
+// so callers can attach arbitrary fields without a schema migration and we
+// never reject an unknown field. An explicit "extras" object, if present, is
+// the base that stray fields merge on top of (stray fields win on collision).
+// timestamp accepts an ISO 8601 / RFC 3339 string or a number of epoch
+// milliseconds.
+//
+// A custom decoder (rather than struct tags) is what makes the leniency work:
+// the standard decoder's DisallowUnknownFields, set on the ingest request body,
+// does not reach into a json.Unmarshaler. Default marshaling round-trips this
+// cleanly — extras serializes back as the "extras" field, which this decoder
+// recognizes — so the DLQ replay path is unaffected.
+func (e *Event) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	if v, ok := raw["event"]; ok {
+		if err := json.Unmarshal(v, &e.Event); err != nil {
+			return fmt.Errorf("event: %w", err)
+		}
+		delete(raw, "event")
+	}
+	if v, ok := raw["timestamp"]; ok {
+		ts, err := parseTimestamp(v)
+		if err != nil {
+			return fmt.Errorf("timestamp: %w", err)
+		}
+		e.Timestamp = ts
+		delete(raw, "timestamp")
+	}
+	if v, ok := raw["distinct_id"]; ok {
+		if err := json.Unmarshal(v, &e.DistinctID); err != nil {
+			return fmt.Errorf("distinct_id: %w", err)
+		}
+		delete(raw, "distinct_id")
+	}
+	if v, ok := raw["session_id"]; ok {
+		if err := json.Unmarshal(v, &e.SessionID); err != nil {
+			return fmt.Errorf("session_id: %w", err)
+		}
+		delete(raw, "session_id")
+	}
+	if v, ok := raw["properties"]; ok {
+		e.Properties = v
+		delete(raw, "properties")
+	}
+
+	// Whatever's left is extras. Seed from an explicit extras object, then
+	// merge remaining stray fields on top. Marshaling the map yields "{}" when
+	// empty, which keeps the extras column valid JSON and lets DLQ replay
+	// round-trip without producing an empty string.
+	extras := map[string]json.RawMessage{}
+	if v, ok := raw["extras"]; ok {
+		if err := json.Unmarshal(v, &extras); err != nil {
+			return fmt.Errorf("extras: %w", err)
+		}
+		delete(raw, "extras")
+	}
+	for k, v := range raw {
+		extras[k] = v
+	}
+	merged, err := json.Marshal(extras)
+	if err != nil {
+		return fmt.Errorf("extras: %w", err)
+	}
+	e.Extras = merged
+	return nil
+}
+
+// parseTimestamp accepts a JSON string (ISO 8601 / RFC 3339) or a JSON number
+// of epoch milliseconds. A null or absent value yields the zero time, which
+// ValidateBatch rejects as "timestamp required".
+func parseTimestamp(raw json.RawMessage) (time.Time, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return time.Time{}, nil
+	}
+	if trimmed[0] == '"' {
+		var ts time.Time
+		if err := json.Unmarshal(raw, &ts); err != nil {
+			return time.Time{}, err
+		}
+		return ts, nil
+	}
+	var ms int64
+	if err := json.Unmarshal(raw, &ms); err != nil {
+		return time.Time{}, err
+	}
+	return time.UnixMilli(ms).UTC(), nil
 }
 
 // batchEnvelope is the unit of work carried over the chan: a validated event

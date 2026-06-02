@@ -236,8 +236,8 @@ func TestOAuth_HappyPath_AuthorizeApproveToken(t *testing.T) {
 		t.Errorf("replay status: %d want 400", resp2.StatusCode)
 	}
 
-	// /v1/whoami with the bearer token.
-	req, _ := http.NewRequest("GET", srv.URL+"/v1/whoami", nil)
+	// /api/v1/whoami with the bearer token.
+	req, _ := http.NewRequest("GET", srv.URL+"/api/v1/whoami", nil)
 	req.Header.Set("Authorization", "Bearer "+tokenPayload.AccessToken)
 	whoResp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -309,7 +309,7 @@ func TestOAuth_Whoami_UnauthorizedCases(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req, _ := http.NewRequest("GET", srv.URL+"/v1/whoami", nil)
+			req, _ := http.NewRequest("GET", srv.URL+"/api/v1/whoami", nil)
 			if tc.header != "" {
 				req.Header.Set("Authorization", tc.header)
 			}
