@@ -173,7 +173,7 @@ func run(logger *slog.Logger) error {
 	//   SIGTERM
 	//      │
 	//      ▼
-	//   phase 1 — ingestSvc.Flags().SetDisabled(true)  ; new /v1/ingest → 503
+	//   phase 1 — ingestSvc.Flags().SetDisabled(true)  ; new /api/v1/ingest/events → 503
 	//      │
 	//      ▼
 	//   phase 2 — srv.Shutdown(httpCtx 10s)             ; in-flight handlers

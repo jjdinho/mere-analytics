@@ -8,7 +8,7 @@
 // /invites/:token.
 //
 // /oauth/* implements a PKCE-only OAuth 2.1 server for /mcp + /api/v1/*.
-// /v1/whoami exists as the bearer middleware's production smoke surface.
+// /api/v1/whoami exists as the bearer middleware's production smoke surface.
 package web
 
 import (
@@ -43,9 +43,9 @@ type Options struct {
 	// most tests; "dev" for un-stamped local builds.
 	Version string
 
-	// IngestService + the three following knobs wire POST /v1/ingest. Nil
-	// IngestService is supported so degenerate test scenarios that build a
-	// handler without a CH pool still work — /v1/ingest is just absent.
+	// IngestService + the three following knobs wire POST /api/v1/ingest/events.
+	// Nil IngestService is supported so degenerate test scenarios that build a
+	// handler without a CH pool still work — the route is just absent.
 	IngestService        *ingest.Service
 	AllowedOrigins       []string
 	IngestMaxBodyBytes   int64
@@ -133,7 +133,7 @@ func Handler(opts Options) http.Handler {
 		// surface is identical across both front doors.
 		bearer := RequireBearer(opts.OAuthService, logger)
 		cors := CORS(opts.AllowedOrigins)
-		mux.Handle("GET /v1/whoami", bearer(getWhoami()))
+		mux.Handle("GET /api/v1/whoami", bearer(getWhoami()))
 
 		// MCP: one endpoint, all methods (the Streamable HTTP transport
 		// handles POST/GET/DELETE). CORS is outermost so a browser preflight
@@ -162,8 +162,8 @@ func Handler(opts Options) http.Handler {
 			MaxBody(opts.IngestMaxBodyBytes)(
 				requirePublicToken(opts.IngestService, logger)(
 					postIngest(opts.IngestService, logger))))
-		mux.Handle("POST /v1/ingest", ingestChain)
-		mux.Handle("OPTIONS /v1/ingest", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle("POST /api/v1/ingest/events", ingestChain)
+		mux.Handle("OPTIONS /api/v1/ingest/events", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 		})))
 	}

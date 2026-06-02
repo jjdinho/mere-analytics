@@ -7,7 +7,7 @@ import "sync/atomic"
 // the INGEST_DISABLED kill switch + SIGTERM phase 1, and a DLQ depth gauge
 // refreshed once per drain pass.
 //
-// All three are atomic; readers are on the hot path (every /v1/ingest
+// All three are atomic; readers are on the hot path (every /api/v1/ingest/events
 // request + /healthz poll).
 type Flags struct {
 	fatal    atomic.Bool
@@ -16,7 +16,7 @@ type Flags struct {
 }
 
 // IsFatal reports whether the flusher has hit a CH+PG dual failure since the
-// last clean flush. While true, /v1/ingest returns 503 + /healthz reports
+// last clean flush. While true, /api/v1/ingest/events returns 503 + /healthz reports
 // down. Cleared by the first clean flush after CH recovers.
 func (f *Flags) IsFatal() bool { return f.fatal.Load() }
 

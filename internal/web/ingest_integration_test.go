@@ -32,7 +32,7 @@ import (
 
 // ingestStack is the per-test infrastructure: real PG (migrated), real CH
 // (migrated), an ingest.Service, the wired web.Handler, and the auth + oauth
-// services backing /v1/whoami's bearer + the project-creation flow used to
+// services backing /api/v1/whoami's bearer + the project-creation flow used to
 // mint a mere_pub_ token.
 type ingestStack struct {
 	srv         *httptest.Server
@@ -197,7 +197,7 @@ func postIngestBatch(t *testing.T, url, token string, body any) *http.Response {
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	req, _ := http.NewRequest("POST", url+"/v1/ingest", &buf)
+	req, _ := http.NewRequest("POST", url+"/api/v1/ingest/events", &buf)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -263,6 +263,59 @@ func TestIngest_HappyPath(t *testing.T) {
 	}
 }
 
+// TestIngest_LenientExtrasAndEpochTimestamp exercises the plan's "lenient on
+// extras" + "epoch ms timestamp" contract end-to-end: an event carrying a
+// stray top-level field and a numeric (epoch-millis) timestamp is accepted
+// (not rejected), and the stray field lands verbatim in the extras column with
+// the timestamp resolved to the correct instant.
+func TestIngest_LenientExtrasAndEpochTimestamp(t *testing.T) {
+	st := startIngestStack(t)
+	token, projectID := mintProjectAndToken(t, st)
+
+	const epochMs = int64(1717200000000)
+	body := map[string]any{"events": []map[string]any{
+		{"event": "purchase", "timestamp": epochMs, "plan_tier": "pro"},
+	}}
+	resp := postIngestBatch(t, st.srv.URL, token, body)
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: %d want 202 (stray field must not be rejected); body=%s", resp.StatusCode, raw)
+	}
+	var parsed struct {
+		Accepted int `json:"accepted"`
+		Rejected int `json:"rejected"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if parsed.Accepted != 1 || parsed.Rejected != 0 {
+		t.Fatalf("accepted=%d rejected=%d want 1/0", parsed.Accepted, parsed.Rejected)
+	}
+
+	if got := waitForCHCount(t, st.chAdmin, projectID, 1, 5*time.Second); got != 1 {
+		t.Fatalf("ch count: %d want 1", got)
+	}
+
+	var extras string
+	var ts time.Time
+	if err := st.chAdmin.QueryRow(
+		`SELECT extras, timestamp FROM events_raw_v1 WHERE project_id = ? LIMIT 1`, projectID,
+	).Scan(&extras, &ts); err != nil {
+		t.Fatalf("ch read: %v", err)
+	}
+	var extrasMap map[string]any
+	if err := json.Unmarshal([]byte(extras), &extrasMap); err != nil {
+		t.Fatalf("extras not valid JSON (%q): %v", extras, err)
+	}
+	if extrasMap["plan_tier"] != "pro" {
+		t.Errorf("extras: got %v want plan_tier=pro", extrasMap)
+	}
+	if want := time.UnixMilli(epochMs).UTC(); !ts.Equal(want) {
+		t.Errorf("timestamp: got %s want %s", ts.UTC(), want)
+	}
+}
+
 // TestIngest_AuthEdges covers the four 401 surfaces + the 500 surface (the
 // last requires PG-down, which we simulate by closing the pool — see
 // TestIngest_PGDownReturns500).
@@ -279,7 +332,7 @@ func TestIngest_AuthEdges(t *testing.T) {
 		return &buf
 	}
 	post := func(headers map[string]string) *http.Response {
-		req, _ := http.NewRequest("POST", st.srv.URL+"/v1/ingest", encode())
+		req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events", encode())
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range headers {
 			req.Header.Set(k, v)
@@ -378,7 +431,7 @@ func TestIngest_OversizedBody(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	_ = json.NewEncoder(&buf).Encode(body)
-	req, _ := http.NewRequest("POST", st.srv.URL+"/v1/ingest", &buf)
+	req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events", &buf)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -396,7 +449,7 @@ func TestIngest_InvalidJSON(t *testing.T) {
 	st := startIngestStack(t)
 	token, _ := mintProjectAndToken(t, st)
 
-	req, _ := http.NewRequest("POST", st.srv.URL+"/v1/ingest", bytes.NewReader([]byte(`{not json}`)))
+	req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events", bytes.NewReader([]byte(`{not json}`)))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -458,7 +511,7 @@ func TestIngest_KillSwitch(t *testing.T) {
 func TestIngest_CORS(t *testing.T) {
 	t.Run("permissive default echoes *", func(t *testing.T) {
 		st := startIngestStack(t)
-		req, _ := http.NewRequest("OPTIONS", st.srv.URL+"/v1/ingest", nil)
+		req, _ := http.NewRequest("OPTIONS", st.srv.URL+"/api/v1/ingest/events", nil)
 		req.Header.Set("Origin", "https://example.com")
 		req.Header.Set("Access-Control-Request-Method", "POST")
 		resp, err := http.DefaultClient.Do(req)
@@ -481,7 +534,7 @@ func TestIngest_CORS(t *testing.T) {
 		st := startIngestStack(t)
 		token, _ := mintProjectAndToken(t, st)
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		req, _ := http.NewRequest("POST", st.srv.URL+"/v1/ingest",
+		req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events",
 			bytes.NewBufferString(fmt.Sprintf(`{"events":[{"event":"x","timestamp":%q}]}`, now)))
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
@@ -508,7 +561,7 @@ func TestIngest_CORS(t *testing.T) {
 
 		// Allowed origin echoes.
 		rec := httptest.NewRecorder()
-		req, _ := http.NewRequest("OPTIONS", "/v1/ingest", nil)
+		req, _ := http.NewRequest("OPTIONS", "/api/v1/ingest/events", nil)
 		req.Header.Set("Origin", allowed)
 		req.Header.Set("Access-Control-Request-Method", "POST")
 		h.ServeHTTP(rec, req)
@@ -521,7 +574,7 @@ func TestIngest_CORS(t *testing.T) {
 
 		// Disallowed origin: response carries no CORS header.
 		rec = httptest.NewRecorder()
-		req, _ = http.NewRequest("OPTIONS", "/v1/ingest", nil)
+		req, _ = http.NewRequest("OPTIONS", "/api/v1/ingest/events", nil)
 		req.Header.Set("Origin", disallowed)
 		req.Header.Set("Access-Control-Request-Method", "POST")
 		h.ServeHTTP(rec, req)
@@ -572,7 +625,7 @@ func TestIngest_Saturation503(t *testing.T) {
 
 // TestIngest_LastUsedAtStamped exercises the OAuth middleware's fire-and-
 // forget last_used_at update. The bearer is obtained through the OAuth
-// authorize+token dance; the stamp lands within 60s of the first /v1/whoami
+// authorize+token dance; the stamp lands within 60s of the first /api/v1/whoami
 // hit; the 60s throttle leaves the second hit untouched.
 func TestIngest_LastUsedAtStamped(t *testing.T) {
 	st := startIngestStack(t)
@@ -605,7 +658,7 @@ func TestIngest_LastUsedAtStamped(t *testing.T) {
 	}
 
 	// First whoami → middleware stamps last_used_at fire-and-forget.
-	req, _ := http.NewRequest("GET", st.srv.URL+"/v1/whoami", nil)
+	req, _ := http.NewRequest("GET", st.srv.URL+"/api/v1/whoami", nil)
 	req.Header.Set("Authorization", "Bearer "+plaintext)
 	if r, err := http.DefaultClient.Do(req); err == nil {
 		r.Body.Close()
@@ -629,7 +682,7 @@ func TestIngest_LastUsedAtStamped(t *testing.T) {
 
 	// Second whoami immediately — 60s throttle predicate must keep the
 	// existing stamp.
-	req2, _ := http.NewRequest("GET", st.srv.URL+"/v1/whoami", nil)
+	req2, _ := http.NewRequest("GET", st.srv.URL+"/api/v1/whoami", nil)
 	req2.Header.Set("Authorization", "Bearer "+plaintext)
 	if r, err := http.DefaultClient.Do(req2); err == nil {
 		r.Body.Close()
@@ -650,7 +703,7 @@ func TestIngest_LastUsedAtStamped(t *testing.T) {
 		`UPDATE oauth_access_tokens SET last_used_at = NOW() - INTERVAL '61 seconds' WHERE user_id = $1`, userID); err != nil {
 		t.Fatalf("rewind: %v", err)
 	}
-	req3, _ := http.NewRequest("GET", st.srv.URL+"/v1/whoami", nil)
+	req3, _ := http.NewRequest("GET", st.srv.URL+"/api/v1/whoami", nil)
 	req3.Header.Set("Authorization", "Bearer "+plaintext)
 	if r, err := http.DefaultClient.Do(req3); err == nil {
 		r.Body.Close()

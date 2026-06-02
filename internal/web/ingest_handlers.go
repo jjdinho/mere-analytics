@@ -21,16 +21,16 @@ func projectFromCtx(ctx context.Context) string {
 	return v
 }
 
-// ingestBody is the request shape POST /v1/ingest accepts.
+// ingestBody is the request shape POST /api/v1/ingest/events accepts.
 type ingestBody struct {
 	Events []ingest.Event `json:"events"`
 }
 
 // ingestResponse is what a successful (or empty-batch) request returns.
 type ingestResponse struct {
-	Accepted int                       `json:"accepted"`
-	Rejected int                       `json:"rejected"`
-	Errors   []ingest.ValidationError  `json:"errors,omitempty"`
+	Accepted int                      `json:"accepted"`
+	Rejected int                      `json:"rejected"`
+	Errors   []ingest.ValidationError `json:"errors,omitempty"`
 }
 
 // requirePublicToken enforces the Authorization: Bearer mere_pub_… handshake
@@ -66,7 +66,7 @@ func requirePublicToken(svc *ingest.Service, logger *slog.Logger) func(http.Hand
 	}
 }
 
-// postIngest is the POST /v1/ingest handler. State checks first (kill switch
+// postIngest is the POST /api/v1/ingest/events handler. State checks first (kill switch
 // + fatal flag), then body decode + validation, then Submit + response.
 //
 //	disabled / fatal → 503 + Retry-After

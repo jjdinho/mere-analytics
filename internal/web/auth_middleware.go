@@ -146,8 +146,8 @@ func methodIsSafe(m string) bool {
 	return false
 }
 
-// pathIsAPI reports whether p targets a bearer-authed surface (/v1/*,
-// /api/v1/*, /mcp) or a non-cookie OAuth endpoint (/oauth/register,
+// pathIsAPI reports whether p targets a bearer-authed surface (/api/v1/*,
+// /mcp) or a non-cookie OAuth endpoint (/oauth/register,
 // /oauth/token). Those routes carry no session cookie and so are immune to
 // CSRF; checking the token would be both unnecessary and impossible.
 //
@@ -158,7 +158,7 @@ func pathIsAPI(p string) bool {
 	case "/oauth/register", "/oauth/token":
 		return true
 	}
-	return strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/api/v1/") || p == "/mcp" || strings.HasPrefix(p, "/mcp/")
+	return strings.HasPrefix(p, "/api/v1/") || p == "/mcp" || strings.HasPrefix(p, "/mcp/")
 }
 
 // submittedCSRFToken returns the CSRF token the client supplied in this

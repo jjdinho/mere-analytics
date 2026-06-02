@@ -59,7 +59,7 @@ func MaxBody(n int64) func(http.Handler) http.Handler {
 	}
 }
 
-// CORS handles the SDK snippet's cross-origin POST to /v1/ingest. An empty
+// CORS handles the SDK snippet's cross-origin POST to /api/v1/ingest/events. An empty
 // allowedOrigins slice is "permissive" — the response carries
 // Access-Control-Allow-Origin: * so any first-party page can write events.
 // A non-empty slice is the operator-restricted form: the request Origin must
@@ -67,7 +67,7 @@ func MaxBody(n int64) func(http.Handler) http.Handler {
 // response from JS, which is the only enforcement layer that matters).
 //
 // Allow-Methods / Allow-Headers are static — we don't accept cookies or
-// custom verbs on /v1/ingest.
+// custom verbs on /api/v1/ingest/events.
 //
 // Preflight (OPTIONS + Access-Control-Request-Method) short-circuits with
 // 204; the wrapped handler never runs.
