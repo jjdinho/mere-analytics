@@ -48,10 +48,13 @@ type Table struct {
 	QualifiedName string
 }
 
-// Column describes one query output or schema column.
+// Column describes one query output or schema column. Description is only
+// populated on the schema surface (curated, keyed by column name); query result
+// columns leave it empty and omitempty keeps it off the wire there.
 type Column struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Description string `json:"description,omitempty"`
 }
 
 // Stats carries minimal execution metadata. It is intentionally small and

@@ -86,7 +86,8 @@ func schemaTool() mcpgo.Tool {
 	return mcpgo.NewTool("schema",
 		mcpgo.WithDescription("Return the queryable table and column catalog for this project's analytics data. "+
 			"Use it to discover what you can SELECT before calling the query tool. Returns JSON "+
-			`{"tables":[{"name","columns":[{"name","type"}]}]}.`),
+			`{"tables":[{"name","description","columns":[{"name","type","description"}]}]}. `+
+			"The descriptions explain what each table and column means so you can build effective queries."),
 		mcpgo.WithReadOnlyHintAnnotation(true),
 		mcpgo.WithIdempotentHintAnnotation(true),
 	)

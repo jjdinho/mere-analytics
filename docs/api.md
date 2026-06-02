@@ -210,7 +210,9 @@ already bound what's observable, and power users want the real message.
 ### `GET /api/v1/projects/{project_id}/schema`
 
 The queryable table/column catalog for a project. Same auth and `404` rules as
-the query endpoint.
+the query endpoint. Every table and column carries a human-readable
+`description` so an agent (or human) can build effective queries without
+guessing what each field means.
 
 **Success — `200`:**
 
@@ -219,40 +221,43 @@ the query endpoint.
   "tables": [
     {
       "name": "events",
+      "description": "Analytics events captured from your application. A view over the raw landing table joined to the identity map, so a late $identify resolves a user's older anonymous events.",
       "columns": [
-        { "name": "project_id",  "type": "UUID" },
-        { "name": "event",       "type": "LowCardinality(String)" },
-        { "name": "distinct_id", "type": "Nullable(String)" },
-        { "name": "timestamp",   "type": "DateTime64(3, 'UTC')" },
-        { "name": "session_id",  "type": "Nullable(String)" },
-        { "name": "properties",  "type": "String" },
-        { "name": "extras",      "type": "String" },
-        { "name": "received_at", "type": "DateTime64(3, 'UTC')" }
+        { "name": "project_id",  "type": "UUID",                  "description": "The project that owns this row. Scoped automatically to your project; you never see other projects' data and never need a project_id filter." },
+        { "name": "event",       "type": "LowCardinality(String)", "description": "The event name, e.g. $pageview or button_click." },
+        { "name": "distinct_id", "type": "Nullable(String)",      "description": "Resolved user identity: the linked user_id when known, otherwise the anonymous_id." },
+        { "name": "timestamp",   "type": "DateTime64(3, 'UTC')",  "description": "When the event occurred (UTC), supplied at ingest." },
+        { "name": "session_id",  "type": "Nullable(String)",      "description": "Session identifier supplied by the SDK/caller." },
+        { "name": "properties",  "type": "String",                "description": "Event properties stored as a JSON string. Read fields with ClickHouse JSONExtract* functions, e.g. JSONExtractString(properties, '$timezone')." },
+        { "name": "extras",      "type": "String",                "description": "Additional ingest payload stored as a JSON string. Read fields with JSONExtract* functions." },
+        { "name": "received_at", "type": "DateTime64(3, 'UTC')",  "description": "When the server received the event (UTC)." }
       ]
     },
     {
       "name": "persons",
+      "description": "Unique users/persons — one row per resolved identity, with first/last seen timestamps and lifetime counts.",
       "columns": [
-        { "name": "project_id", "type": "UUID" },
-        { "name": "distinct_id", "type": "String" },
-        { "name": "first_seen", "type": "DateTime64(3, 'UTC')" },
-        { "name": "last_seen", "type": "DateTime64(3, 'UTC')" },
-        { "name": "event_count", "type": "UInt64" },
-        { "name": "session_count", "type": "UInt64" },
-        { "name": "timezone", "type": "LowCardinality(String)" }
+        { "name": "project_id",    "type": "UUID",                  "description": "The project that owns this row. Scoped automatically to your project; you never see other projects' data and never need a project_id filter." },
+        { "name": "distinct_id",   "type": "String",                "description": "Resolved user identity: the linked user_id when known, otherwise the anonymous_id." },
+        { "name": "first_seen",    "type": "DateTime64(3, 'UTC')",  "description": "Timestamp of the person's first event (UTC)." },
+        { "name": "last_seen",     "type": "DateTime64(3, 'UTC')",  "description": "Timestamp of the person's most recent event (UTC)." },
+        { "name": "event_count",   "type": "UInt64",                "description": "Total number of events." },
+        { "name": "session_count", "type": "UInt64",                "description": "Approximate number of distinct sessions." },
+        { "name": "timezone",      "type": "LowCardinality(String)", "description": "Most recent non-empty properties.$timezone value seen." }
       ]
     },
     {
       "name": "sessions",
+      "description": "User sessions — one row per session_id, with start/end timestamps, duration, and event counts.",
       "columns": [
-        { "name": "project_id", "type": "UUID" },
-        { "name": "session_id", "type": "String" },
-        { "name": "distinct_id", "type": "Nullable(String)" },
-        { "name": "started_at", "type": "DateTime64(3, 'UTC')" },
-        { "name": "ended_at", "type": "DateTime64(3, 'UTC')" },
-        { "name": "duration_ms", "type": "Int64" },
-        { "name": "event_count", "type": "UInt64" },
-        { "name": "timezone", "type": "LowCardinality(String)" }
+        { "name": "project_id",  "type": "UUID",                  "description": "The project that owns this row. Scoped automatically to your project; you never see other projects' data and never need a project_id filter." },
+        { "name": "session_id",  "type": "String",                "description": "Session identifier supplied by the SDK/caller." },
+        { "name": "distinct_id", "type": "Nullable(String)",      "description": "Resolved user identity: the linked user_id when known, otherwise the anonymous_id." },
+        { "name": "started_at",  "type": "DateTime64(3, 'UTC')",  "description": "Timestamp of the session's first event (UTC)." },
+        { "name": "ended_at",    "type": "DateTime64(3, 'UTC')",  "description": "Timestamp of the session's last event (UTC)." },
+        { "name": "duration_ms", "type": "Int64",                 "description": "Session duration in milliseconds (ended_at − started_at), computed at read time." },
+        { "name": "event_count", "type": "UInt64",                "description": "Total number of events." },
+        { "name": "timezone",    "type": "LowCardinality(String)", "description": "Most recent non-empty properties.$timezone value seen." }
       ]
     }
   ]
@@ -260,7 +265,9 @@ the query endpoint.
 ```
 
 The schema endpoint and the query executor share one allowlist, so the public
-catalog cannot drift from what queries can use.
+catalog cannot drift from what queries can use. Column names and types come from
+a live `DESCRIBE TABLE`; the descriptions are curated and attached by column
+name.
 
 ### The `events` table
 
@@ -433,7 +440,7 @@ Two tools:
 | Tool | Arguments | Returns |
 |---|---|---|
 | `query` | `sql` (string, required) | `{"columns":[{"name","type"}], "rows":[[…]], "stats":{"rows","elapsed_ms"}}` — same envelope as the HTTP query API. Results are capped at 1000 rows; always add a `LIMIT`. |
-| `schema` | none | `{"tables":[{"name","columns":[{"name","type"}]}]}` — the queryable catalog. |
+| `schema` | none | `{"tables":[{"name","description","columns":[{"name","type","description"}]}]}` — the queryable catalog, with curated descriptions of each table and column. |
 
 Both tools enforce the same tenant isolation as the HTTP API and re-check
 project visibility on each call (a project soft-deleted within the token's
