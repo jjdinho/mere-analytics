@@ -103,7 +103,7 @@ func (s *Service) insertIntoClickHouse(ctx context.Context, items []flushItem) e
 	}
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO events_raw_v1
-		(project_id, event, distinct_id, timestamp, session_id, properties, extras)
+		(project_id, event, anonymous_id, user_id, timestamp, session_id, properties, extras)
 	`)
 	if err != nil {
 		_ = tx.Rollback()
@@ -113,7 +113,8 @@ func (s *Service) insertIntoClickHouse(ctx context.Context, items []flushItem) e
 		if _, err := stmt.ExecContext(ctx,
 			it.projectID,
 			it.event.Event,
-			it.event.DistinctID,
+			it.event.AnonymousID,
+			it.event.UserID,
 			it.event.Timestamp,
 			it.event.SessionID,
 			string(it.event.Properties),

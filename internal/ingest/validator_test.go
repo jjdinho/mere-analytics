@@ -9,8 +9,6 @@ import (
 
 func TestValidateBatch(t *testing.T) {
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	strPtr := func(s string) *string { return &s }
-
 	tests := []struct {
 		name           string
 		events         []Event
@@ -55,7 +53,7 @@ func TestValidateBatch(t *testing.T) {
 			events: []Event{
 				{Event: "ok1", Timestamp: now},
 				{Event: "", Timestamp: now},
-				{Event: "ok2", Timestamp: now, DistinctID: strPtr("user-1")},
+				{Event: "ok2", Timestamp: now},
 				{Event: "bad-ts"},
 			},
 			wantValid: 2,

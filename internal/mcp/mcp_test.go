@@ -82,10 +82,22 @@ func newStack(t *testing.T) *stack {
 	} {
 		if _, err := admin.ExecContext(ctx, `
 			INSERT INTO events_raw_v1
-			(project_id, event, distinct_id, timestamp, session_id, properties, extras)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, row.projectID, "pageview", "user", ts, "sess", row.properties, `{}`); err != nil {
+			(project_id, event, anonymous_id, user_id, timestamp, session_id, properties, extras)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, row.projectID, "pageview", "anon", nil, ts, "sess", row.properties, `{}`); err != nil {
 			t.Fatalf("seed ch row: %v", err)
+		}
+	}
+	for _, row := range []struct{ projectID, anonymousID, userID string }{
+		{projA.ID, "anon-a", "user-a"},
+		{projB.ID, "anon-b", "user-b"},
+	} {
+		if _, err := admin.ExecContext(ctx, `
+			INSERT INTO events_raw_v1
+			(project_id, event, anonymous_id, user_id, timestamp, session_id, properties, extras)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, row.projectID, "$identify", row.anonymousID, row.userID, ts.Add(time.Minute), "sess", `{}`, `{}`); err != nil {
+			t.Fatalf("seed identify row: %v", err)
 		}
 	}
 	readonly, err := appch.OpenReadonly(ctx, chCfg)
@@ -223,10 +235,10 @@ func TestMCPTools_TenantIsolation(t *testing.T) {
 		name string
 		sql  string
 	}{
-		{"naive", `SELECT properties FROM events_raw_v1`},
-		{"qualified", `SELECT properties FROM analytics.events_raw_v1`},
-		{"subquery", `SELECT properties FROM (SELECT * FROM events_raw_v1)`},
-		{"self_join", `SELECT a.properties FROM events_raw_v1 a INNER JOIN events_raw_v1 b ON a.distinct_id = b.distinct_id`},
+		{"naive", `SELECT properties FROM events`},
+		{"qualified", `SELECT properties FROM analytics.events`},
+		{"subquery", `SELECT properties FROM (SELECT * FROM events)`},
+		{"self_join", `SELECT a.properties FROM events a INNER JOIN events b ON a.distinct_id = b.distinct_id`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := callTool(t, srv, "query", map[string]any{"sql": tc.sql})
@@ -250,14 +262,50 @@ func TestMCPTools_TenantIsolation(t *testing.T) {
 		if res.rpcErr != nil || res.isError {
 			t.Fatalf("schema failed: err=%+v isError=%v text=%s", res.rpcErr, res.isError, res.text)
 		}
-		if !strings.Contains(res.text, "events_raw_v1") {
-			t.Errorf("schema missing events_raw_v1: %s", res.text)
+		for _, table := range []string{"events", "persons", "sessions"} {
+			if !strings.Contains(res.text, `"`+table+`"`) {
+				t.Errorf("schema missing %s: %s", table, res.text)
+			}
+		}
+		if strings.Contains(res.text, "events_raw_v1") {
+			t.Errorf("schema leaked hidden raw table: %s", res.text)
 		}
 		if !strings.Contains(res.text, "project_id") {
 			t.Errorf("schema missing project_id column: %s", res.text)
 		}
 		if strings.Contains(res.text, "schema_migrations") {
 			t.Errorf("schema leaked a non-allowlisted table: %s", res.text)
+		}
+	})
+
+	t.Run("direct_internal_table_queries_still_do_not_leak", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			sql  string
+		}{
+			{"public_events", `SELECT distinct_id FROM events`},
+			{"public_persons", `SELECT distinct_id FROM persons`},
+			{"public_sessions", `SELECT distinct_id FROM sessions`},
+			{"hidden_raw", `SELECT coalesce(user_id, anonymous_id) FROM events_raw_v1`},
+			{"hidden_identity_links", `SELECT user_id FROM identity_links_v1`},
+			{"hidden_persons_state", `SELECT raw_distinct_id FROM persons_state`},
+			{"hidden_sessions_state", `SELECT coalesce(user_id, anonymous_id) FROM sessions_state`},
+			{"hidden_identity_links_mv", `SELECT user_id FROM identity_links_mv`},
+			{"hidden_persons_mv", `SELECT raw_distinct_id FROM persons_mv`},
+			{"hidden_sessions_mv", `SELECT coalesce(user_id, anonymous_id) FROM sessions_mv`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				res := callTool(t, srv, "query", map[string]any{"sql": tc.sql})
+				if res.rpcErr != nil {
+					t.Fatalf("unexpected jsonrpc error: %+v", res.rpcErr)
+				}
+				if res.isError {
+					t.Fatalf("unexpected tool error: %s", res.text)
+				}
+				if strings.Contains(res.text, "anon-b") || strings.Contains(res.text, "user-b") {
+					t.Fatalf("LEAK through %s: project B identity visible: %s", tc.name, res.text)
+				}
+			})
 		}
 	})
 }
@@ -272,7 +320,7 @@ func TestMCPTools_SoftDeletedProjectDenied(t *testing.T) {
 	}
 	srv := s.serverAs(t, s.userID, s.projectA)
 
-	res := callTool(t, srv, "query", map[string]any{"sql": "SELECT count() FROM events_raw_v1"})
+	res := callTool(t, srv, "query", map[string]any{"sql": "SELECT count() FROM events"})
 	if res.rpcErr != nil {
 		t.Fatalf("unexpected jsonrpc error: %+v", res.rpcErr)
 	}

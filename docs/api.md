@@ -47,7 +47,8 @@ Content-Type: application/json
     {
       "event": "pageview",
       "timestamp": "2026-06-02T14:30:45.123Z",
-      "distinct_id": "user-123",
+      "anonymous_id": "anon-123",
+      "user_id": "user-123",
       "session_id": "sess-456",
       "properties": { "path": "/pricing", "ref": "twitter" },
       "plan_tier": "pro"
@@ -62,10 +63,28 @@ Per-event fields:
 |---|---|---|---|
 | `event` | **yes** | string | Must be non-empty. |
 | `timestamp` | **yes** | string \| number | ISO 8601 / RFC 3339 string (e.g. `2026-06-02T14:30:45Z`), **or** a number of epoch milliseconds (e.g. `1717200000000`). |
-| `distinct_id` | no | string | Caller-supplied identity. Stored `NULL` if omitted. |
-| `session_id` | no | string | |
+| `anonymous_id` | no | string | Stable anonymous browser/device identity. `anonymousId` is also accepted. |
+| `user_id` | no | string | Stable authenticated user identity. `userId` is also accepted. |
+| `session_id` | no | string | `sessionId` is also accepted. |
 | `properties` | no | object | Arbitrary JSON; stored verbatim. Defaults to `{}`. |
 | *(any other field)* | no | any | Folded verbatim into the event's `extras` column — see below. |
+
+`$identify` events link earlier anonymous events to a later authenticated user:
+
+```json
+{
+  "event": "$identify",
+  "timestamp": "2026-06-02T14:35:00.000Z",
+  "anonymous_id": "anon-123",
+  "user_id": "user-123",
+  "session_id": "sess-456",
+  "properties": { "email": "user@example.com" }
+}
+```
+
+The query surface exposes a resolved `distinct_id`: `user_id` when known,
+otherwise `anonymous_id`. Pre-identification anonymous events resolve to the
+linked `user_id` after the `$identify` event is ingested.
 
 > **Lenient on extras.** Any top-level field on an event that isn't one of the
 > first-class fields above is collected verbatim into that event's `extras`
@@ -127,7 +146,7 @@ Content-Type: application/json
 ```
 
 ```json
-{ "sql": "SELECT event, count() AS n FROM events_raw_v1 GROUP BY event ORDER BY n DESC LIMIT 20" }
+{ "sql": "SELECT event, count() AS n FROM events GROUP BY event ORDER BY n DESC LIMIT 20" }
 ```
 
 **Success — `200`**, streamed as a JSON envelope:
@@ -151,20 +170,24 @@ Content-Type: application/json
   RFC 3339 nanosecond strings, UUIDs → 36-char strings.
 - `stats` — `rows` returned and wall-clock `elapsed_ms`.
 
+**Queryable surface.** The schema and MCP tools advertise only three tables:
+`events`, `persons`, and `sessions`. `events_raw_v1`, `identity_links_v1`, and
+the aggregate state tables are internal implementation details.
+
 **Tenant isolation.** Your SQL is sent to ClickHouse **unmodified**. The server
-attaches `additional_table_filters` for `analytics.events_raw_v1` so ClickHouse
-transparently injects `project_id = '<your-project>'` into every reference to
-the events table — including self-joins, subqueries, and aliases. The query runs
-as the read-only `mere_readonly` user, which cannot reach `system.*` or any
-non-allowlisted table.
+attaches `additional_table_filters` for the hidden physical tables behind
+`events`, `persons`, and `sessions`, so ClickHouse transparently injects
+`project_id = '<your-project>'` into every real table scan — including
+self-joins, subqueries, view expansions, and aliases. The query runs as the
+read-only `mere_readonly` user, which cannot reach `system.*`.
 
 **Per-request limits** (applied server-side, not overridable from your SQL):
 
 | Setting | Value |
 |---|---|
-| `max_execution_time` | 30s |
+| `max_execution_time` | 60s by default; configurable with `QUERY_MAX_EXECUTION_TIME`. |
 | `max_memory_usage` | 4 GiB |
-| `max_result_rows` | 1,000,000 |
+| `max_result_rows` | 1,000 by default; configurable with `QUERY_MAX_RESULT_ROWS`. |
 
 **Errors:**
 
@@ -195,7 +218,7 @@ the query endpoint.
 {
   "tables": [
     {
-      "name": "events_raw_v1",
+      "name": "events",
       "columns": [
         { "name": "project_id",  "type": "UUID" },
         { "name": "event",       "type": "LowCardinality(String)" },
@@ -206,31 +229,89 @@ the query endpoint.
         { "name": "extras",      "type": "String" },
         { "name": "received_at", "type": "DateTime64(3, 'UTC')" }
       ]
+    },
+    {
+      "name": "persons",
+      "columns": [
+        { "name": "project_id", "type": "UUID" },
+        { "name": "distinct_id", "type": "String" },
+        { "name": "first_seen", "type": "DateTime64(3, 'UTC')" },
+        { "name": "last_seen", "type": "DateTime64(3, 'UTC')" },
+        { "name": "event_count", "type": "UInt64" },
+        { "name": "session_count", "type": "UInt64" },
+        { "name": "timezone", "type": "LowCardinality(String)" }
+      ]
+    },
+    {
+      "name": "sessions",
+      "columns": [
+        { "name": "project_id", "type": "UUID" },
+        { "name": "session_id", "type": "String" },
+        { "name": "distinct_id", "type": "Nullable(String)" },
+        { "name": "started_at", "type": "DateTime64(3, 'UTC')" },
+        { "name": "ended_at", "type": "DateTime64(3, 'UTC')" },
+        { "name": "duration_ms", "type": "Int64" },
+        { "name": "event_count", "type": "UInt64" },
+        { "name": "timezone", "type": "LowCardinality(String)" }
+      ]
     }
   ]
 }
 ```
 
-`events_raw_v1` is the only queryable table today; the schema endpoint and the
-query executor share one allowlist, so it cannot drift.
+The schema endpoint and the query executor share one allowlist, so the public
+catalog cannot drift from what queries can use.
 
-### The `events_raw_v1` table
+### The `events` table
 
 | Column | Type | Notes |
 |---|---|---|
 | `project_id` | `UUID` | Filtered automatically — you never see other projects' rows. |
 | `event` | `LowCardinality(String)` | The event name. |
-| `distinct_id` | `Nullable(String)` | Caller-supplied identity, or `NULL`. |
+| `distinct_id` | `Nullable(String)` | Resolved identity: linked `user_id` when known, otherwise `anonymous_id`. |
 | `timestamp` | `DateTime64(3, 'UTC')` | Event time supplied at ingest. |
 | `session_id` | `Nullable(String)` | |
 | `properties` | `String` | JSON text. Query with `JSONExtract*`, e.g. `JSONExtractString(properties, 'path')`. |
 | `extras` | `String` | JSON text, same querying approach. |
 | `received_at` | `DateTime64(3, 'UTC')` | Server receive time (default `now64`). |
 
-The table is `ORDER BY (project_id, timestamp, event)` and partitioned
-`toYYYYMM(timestamp)`. `properties` and `extras` are stored as JSON **strings**,
-not as a native JSON/Map type — use ClickHouse's `JSONExtract*` functions to
-read fields out of them.
+`events` is a plain view over the raw landing table plus the identity lookup, so
+late `$identify` events can resolve older anonymous events without rewriting
+ClickHouse rows. `properties` and `extras` are stored as JSON **strings**, not as
+a native JSON/Map type — use ClickHouse's `JSONExtract*` functions to read fields
+out of them.
+
+### The `persons` table
+
+| Column | Type | Notes |
+|---|---|---|
+| `project_id` | `UUID` | Filtered automatically. |
+| `distinct_id` | `String` | Resolved person identity. |
+| `first_seen` | `DateTime64(3, 'UTC')` | First event timestamp for the resolved identity. |
+| `last_seen` | `DateTime64(3, 'UTC')` | Most recent event timestamp for the resolved identity. |
+| `event_count` | `UInt64` | Total events for the resolved identity. |
+| `session_count` | `UInt64` | Approximate unique session count. |
+| `timezone` | `LowCardinality(String)` | Last non-empty `properties.$timezone` value seen for the resolved identity. |
+
+`persons` is a public view over hidden materialized aggregate state. The state is
+keyed by stable raw identities and grouped through the identity lookup at read
+time, so late `$identify` events merge anonymous and identified rows without
+rewriting aggregate storage.
+
+### The `sessions` table
+
+| Column | Type | Notes |
+|---|---|---|
+| `project_id` | `UUID` | Filtered automatically. |
+| `session_id` | `String` | Caller/SDK supplied session id. |
+| `distinct_id` | `Nullable(String)` | Resolved identity for the session. |
+| `started_at` | `DateTime64(3, 'UTC')` | First event timestamp in the session. |
+| `ended_at` | `DateTime64(3, 'UTC')` | Last event timestamp in the session. |
+| `duration_ms` | `Int64` | `ended_at - started_at`, computed at read time. |
+| `event_count` | `UInt64` | Total events in the session. |
+| `timezone` | `LowCardinality(String)` | Last non-empty `properties.$timezone` value seen in the session. |
+
+`sessions` is also a public view over hidden materialized aggregate state.
 
 ---
 

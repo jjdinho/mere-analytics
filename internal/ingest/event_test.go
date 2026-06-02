@@ -51,7 +51,8 @@ func TestEvent_UnmarshalJSON_firstClassFieldsExcludedFromExtras(t *testing.T) {
 	body := `{
 		"event":"click",
 		"timestamp":"2026-06-01T00:00:00Z",
-		"distinct_id":"u1",
+		"anonymous_id":"anon1",
+		"user_id":"u1",
 		"session_id":"s1",
 		"properties":{"path":"/"},
 		"custom":"keep"
@@ -59,14 +60,44 @@ func TestEvent_UnmarshalJSON_firstClassFieldsExcludedFromExtras(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &e); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if e.DistinctID == nil || *e.DistinctID != "u1" {
-		t.Errorf("DistinctID: got %v", e.DistinctID)
+	if e.AnonymousID == nil || *e.AnonymousID != "anon1" {
+		t.Errorf("AnonymousID: got %v", e.AnonymousID)
+	}
+	if e.UserID == nil || *e.UserID != "u1" {
+		t.Errorf("UserID: got %v", e.UserID)
 	}
 	if e.SessionID == nil || *e.SessionID != "s1" {
 		t.Errorf("SessionID: got %v", e.SessionID)
 	}
 	if got := parseObj(t, e.Properties); !reflect.DeepEqual(got, map[string]any{"path": "/"}) {
 		t.Errorf("Properties: got %v", got)
+	}
+	if got := parseObj(t, e.Extras); !reflect.DeepEqual(got, map[string]any{"custom": "keep"}) {
+		t.Errorf("Extras: got %v want {custom:keep}", got)
+	}
+}
+
+func TestEvent_UnmarshalJSON_acceptsBrowserSDKIdentityAliases(t *testing.T) {
+	var e Event
+	body := `{
+		"event":"click",
+		"timestamp":"2026-06-01T00:00:00Z",
+		"anonymousId":"anon1",
+		"userId":"u1",
+		"sessionId":"s1",
+		"custom":"keep"
+	}`
+	if err := json.Unmarshal([]byte(body), &e); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if e.AnonymousID == nil || *e.AnonymousID != "anon1" {
+		t.Errorf("AnonymousID: got %v", e.AnonymousID)
+	}
+	if e.UserID == nil || *e.UserID != "u1" {
+		t.Errorf("UserID: got %v", e.UserID)
+	}
+	if e.SessionID == nil || *e.SessionID != "s1" {
+		t.Errorf("SessionID: got %v", e.SessionID)
 	}
 	if got := parseObj(t, e.Extras); !reflect.DeepEqual(got, map[string]any{"custom": "keep"}) {
 		t.Errorf("Extras: got %v want {custom:keep}", got)
@@ -131,7 +162,7 @@ func TestEvent_UnmarshalJSON_explicitExtrasMergedWithStrayFields(t *testing.T) {
 func TestEvent_DLQRoundTrip(t *testing.T) {
 	var e Event
 	ms := int64(1717200000000)
-	body := `{"event":"purchase","timestamp":1717200000000,"distinct_id":"u9","amount":9.99}`
+	body := `{"event":"purchase","timestamp":1717200000000,"anonymous_id":"anon9","user_id":"u9","amount":9.99}`
 	if err := json.Unmarshal([]byte(body), &e); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -155,8 +186,11 @@ func TestEvent_DLQRoundTrip(t *testing.T) {
 	if !got.Timestamp.Equal(time.UnixMilli(ms).UTC()) {
 		t.Errorf("Timestamp: got %s", got.Timestamp)
 	}
-	if got.DistinctID == nil || *got.DistinctID != "u9" {
-		t.Errorf("DistinctID: got %v", got.DistinctID)
+	if got.AnonymousID == nil || *got.AnonymousID != "anon9" {
+		t.Errorf("AnonymousID: got %v", got.AnonymousID)
+	}
+	if got.UserID == nil || *got.UserID != "u9" {
+		t.Errorf("UserID: got %v", got.UserID)
 	}
 	if gotExtras := parseObj(t, got.Extras); !reflect.DeepEqual(gotExtras, map[string]any{"amount": 9.99}) {
 		t.Errorf("Extras after round-trip: got %v want {amount:9.99}", gotExtras)

@@ -32,12 +32,12 @@ func queryTool() mcpgo.Tool {
 	return mcpgo.NewTool("query",
 		mcpgo.WithDescription("Run a read-only SQL query (ClickHouse dialect) against this project's analytics events. "+
 			"The query is automatically scoped to the project bound to your access token — you cannot read another "+
-			"project's data. Events live in the table events_raw_v1. Returns JSON "+
+			"project's data. Queryable tables are events, persons, and sessions. Returns JSON "+
 			`{"columns":[{"name","type"}],"rows":[[...]],"stats":{"rows","elapsed_ms"}}. `+
 			"Always add a LIMIT; results are capped at 1000 rows."),
 		mcpgo.WithString("sql",
 			mcpgo.Description("The SQL SELECT statement to run, e.g. "+
-				"SELECT event, count() FROM events_raw_v1 GROUP BY event ORDER BY count() DESC LIMIT 20"),
+				"SELECT event, count() FROM events GROUP BY event ORDER BY count() DESC LIMIT 20"),
 			mcpgo.Required(),
 		),
 		mcpgo.WithReadOnlyHintAnnotation(true),

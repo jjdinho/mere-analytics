@@ -67,6 +67,14 @@ type Config struct {
 	// QueryMaxBodyBytes caps POST /api/v1/projects/:id/query bodies. The query
 	// result itself streams and is bounded by ClickHouse max_result_rows.
 	QueryMaxBodyBytes int64 `env:"QUERY_MAX_BODY_BYTES" envDefault:"262144"`
+
+	// QueryMaxResultRows caps ClickHouse result rows for every query front door:
+	// HTTP API, MCP, and the web playground.
+	QueryMaxResultRows uint64 `env:"QUERY_MAX_RESULT_ROWS" envDefault:"1000"`
+
+	// QueryMaxExecutionTime caps ClickHouse query runtime. Values are rounded up
+	// to whole seconds when sent to ClickHouse's max_execution_time setting.
+	QueryMaxExecutionTime time.Duration `env:"QUERY_MAX_EXECUTION_TIME" envDefault:"1m"`
 }
 
 func Load() (Config, error) {
@@ -110,6 +118,12 @@ func (c Config) validate() error {
 	if c.ClickHousePort <= 0 || c.ClickHousePort > 65535 {
 		return fmt.Errorf("CLICKHOUSE_PORT %d out of range", c.ClickHousePort)
 	}
+	if c.QueryMaxResultRows == 0 {
+		return fmt.Errorf("QUERY_MAX_RESULT_ROWS must be > 0")
+	}
+	if c.QueryMaxExecutionTime <= 0 {
+		return fmt.Errorf("QUERY_MAX_EXECUTION_TIME must be > 0")
+	}
 	return nil
 }
 
@@ -144,5 +158,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Int("dlq_depth_503_threshold", c.DLQDepth503Threshold),
 		slog.Any("allowed_origins", c.AllowedOrigins),
 		slog.Int64("query_max_body_bytes", c.QueryMaxBodyBytes),
+		slog.Uint64("query_max_result_rows", c.QueryMaxResultRows),
+		slog.Duration("query_max_execution_time", c.QueryMaxExecutionTime),
 	)
 }
