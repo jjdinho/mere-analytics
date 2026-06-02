@@ -276,6 +276,11 @@ func TestMCPTools_TenantIsolation(t *testing.T) {
 		if strings.Contains(res.text, "schema_migrations") {
 			t.Errorf("schema leaked a non-allowlisted table: %s", res.text)
 		}
+		// The catalog must describe tables and columns, not just name them, so
+		// an agent can build effective queries from it.
+		if !strings.Contains(res.text, `"description"`) {
+			t.Errorf("schema missing table/column descriptions: %s", res.text)
+		}
 	})
 
 	t.Run("direct_internal_table_queries_still_do_not_leak", func(t *testing.T) {
