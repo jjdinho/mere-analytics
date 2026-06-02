@@ -28,6 +28,8 @@ done
 export PORT=8080
 # Local HTTP isn't TLS; cookies need Secure=false to be set by the browser.
 export SECURE_COOKIES=false
+# Externally reachable base URL the in-process OAuth server advertises.
+export OAUTH_ISSUER_URL=http://127.0.0.1:8080
 
 export POSTGRES_HOST=127.0.0.1
 export POSTGRES_PORT=55432
