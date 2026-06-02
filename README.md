@@ -72,6 +72,13 @@ the environment reference, operator actions, backups, and migration recovery.
 - **[docs/adr/](docs/adr/)** — architecture decision records (licensing,
   open-core, the extension-seam contract).
 
+## Contributing
+
+Pull requests are welcome. Every commit must be signed off (`git commit -s`),
+and submitting a contribution grants the maintainers the dual-licensing rights
+the hosted build depends on. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the
+sign-off requirement and the contribution license grant before you open a PR.
+
 ## License
 
 [AGPL-3.0-or-later](LICENSE). Self-host, modify, and run mere freely — a
