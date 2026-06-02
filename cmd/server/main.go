@@ -110,6 +110,8 @@ func run(logger *slog.Logger) error {
 	defer chReadonly.Close()
 	logger.Info("ch readonly open")
 	queryExec := query.NewExecutor(chReadonly, cfg.ClickHouseDatabase)
+	queryExec.MaxResultRows = cfg.QueryMaxResultRows
+	queryExec.MaxExecutionTime = int((cfg.QueryMaxExecutionTime + time.Second - 1) / time.Second)
 	querySchema := query.NewSchemaProvider(chReadonly, queryExec)
 
 	// --- Ingest pipeline ---

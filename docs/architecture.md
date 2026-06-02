@@ -27,7 +27,8 @@ One Go binary, two databases.
                  ┌────────────┐     ┌──────────────┐
                  │  Postgres  │     │  ClickHouse  │
                  │ (operational│    │  (analytics) │
-                 │   state)   │     │ events_raw_v1│
+                 │   state)   │     │ events/persons/
+                 │            │     │ sessions views│
                  └────────────┘     └──────────────┘
 ```
 
@@ -75,11 +76,13 @@ authority comes entirely from team membership, enforced by the `Viewer`.
 (time-sortable), generated app-side. SQL is `sqlc`-generated typed Go from
 `internal/postgres/queries/`.
 
-**ClickHouse** holds analytics. A single versioned landing table,
-`events_raw_v1`, is also the queryable surface — there are no derived read
-models in v1. `properties` and `extras` are stored as JSON **strings**; query
-them with `JSONExtract*`. `project_id` is the leading `ORDER BY` component, so
-project scoping is cheap at the part level.
+**ClickHouse** holds analytics. Ingest writes to the hidden landing table
+`events_raw_v1`; the public query surface is the curated trio `events`,
+`persons`, and `sessions`. `events` is a plain view that resolves identity at
+read time. `persons` and `sessions` are public views over hidden materialized
+aggregate state tables. `properties` and `extras` are stored as JSON
+**strings**; query them with `JSONExtract*`. `project_id` is the leading key on
+the physical tables, so project scoping is cheap at the part level.
 
 Two ClickHouse users, both app-managed:
 
@@ -92,10 +95,17 @@ Two ClickHouse users, both app-managed:
 ## Ingest pipeline
 
 `internal/ingest`. `POST /api/v1/ingest/events` validates the batch (required `event` +
-`timestamp`; `properties`/`extras` default to `{}`; per-event rejection
-reasons), pushes valid events onto a buffered channel, and returns `202`
-immediately. A background flusher drains the channel and writes one batched
-`INSERT` to `events_raw_v1` as `mere_admin`, flushing on a size or time trigger.
+`timestamp`; optional `anonymous_id`, `user_id`, `session_id`;
+`properties`/`extras` default to `{}`; per-event rejection reasons), pushes
+valid events onto a buffered channel, and returns `202` immediately. A
+background flusher drains the channel and writes one batched `INSERT` to
+`events_raw_v1` as `mere_admin`, flushing on a size or time trigger.
+
+`$identify` events with `anonymous_id` and `user_id` populate
+`identity_links_v1` through a ClickHouse materialized view. Public
+`distinct_id` columns resolve to `user_id` when known, otherwise
+`anonymous_id`, so pre-identification events can be queried under the later
+identified user without rewriting raw event rows.
 
 Reliability is layered:
 
@@ -118,11 +128,15 @@ inserts again at the server; the two layers are complementary.
 `internal/query`. The executor sends the user's SQL to ClickHouse
 **unmodified** and attaches the `additional_table_filters` session setting,
 which transparently injects `project_id = '<grant>'` into every reference to
-`analytics.events_raw_v1` — self-joins, subqueries, aliases included. There is
-no SQL parser or CTE rewriter to audit. The connection runs as `mere_readonly`,
-which can't reach `system.*` or any non-allowlisted table, and per-request
-limits (`max_execution_time`, `max_memory_usage`, `max_result_rows`) are
-attached the same way. Results stream to the client rather than buffering.
+the hidden physical tables scanned by the public views: `events_raw_v1`,
+`identity_links_v1`, `persons_state`, and `sessions_state`. This matters because
+ClickHouse materialized views write to separate state tables; filtering only the
+raw landing table would not isolate `persons` or `sessions`. There is no SQL
+parser or CTE rewriter to audit. The connection runs as `mere_readonly`, and
+per-request limits (`max_execution_time`, `max_memory_usage`, `max_result_rows`)
+are attached the same way. By default queries have 60 seconds and 1000 result
+rows, tunable with `QUERY_MAX_EXECUTION_TIME` and `QUERY_MAX_RESULT_ROWS`.
+Results stream to the client rather than buffering.
 
 **Single executor, two front doors.** The HTTP query/schema handlers and the MCP
 `query`/`schema` tools both call the same `internal/query` executor and schema

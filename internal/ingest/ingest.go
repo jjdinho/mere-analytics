@@ -69,22 +69,24 @@ import (
 // captured at submission time, so a rename here would orphan in-flight DLQ
 // rows on the next deploy.
 type Event struct {
-	Event      string          `json:"event"`
-	DistinctID *string         `json:"distinct_id,omitempty"`
-	Timestamp  time.Time       `json:"timestamp"`
-	SessionID  *string         `json:"session_id,omitempty"`
-	Properties json.RawMessage `json:"properties,omitempty"`
-	Extras     json.RawMessage `json:"extras,omitempty"`
+	Event       string          `json:"event"`
+	AnonymousID *string         `json:"anonymous_id,omitempty"`
+	UserID      *string         `json:"user_id,omitempty"`
+	Timestamp   time.Time       `json:"timestamp"`
+	SessionID   *string         `json:"session_id,omitempty"`
+	Properties  json.RawMessage `json:"properties,omitempty"`
+	Extras      json.RawMessage `json:"extras,omitempty"`
 }
 
 // UnmarshalJSON decodes an event with the "strict on required, lenient on
-// extras" contract: event, timestamp, distinct_id, session_id, and properties
-// are first-class; every other top-level field is folded verbatim into extras,
-// so callers can attach arbitrary fields without a schema migration and we
-// never reject an unknown field. An explicit "extras" object, if present, is
-// the base that stray fields merge on top of (stray fields win on collision).
-// timestamp accepts an ISO 8601 / RFC 3339 string or a number of epoch
-// milliseconds.
+// extras" contract: event, timestamp, anonymous_id, user_id, session_id, and
+// properties are first-class; every other top-level field is folded verbatim
+// into extras, so callers can attach arbitrary fields without a schema
+// migration and we never reject an unknown field. camelCase aliases
+// (anonymousId, userId, sessionId) are also accepted for browser SDK payloads.
+// An explicit "extras" object, if present, is the base that stray fields merge
+// on top of (stray fields win on collision). timestamp accepts an ISO 8601 /
+// RFC 3339 string or a number of epoch milliseconds.
 //
 // A custom decoder (rather than struct tags) is what makes the leniency work:
 // the standard decoder's DisallowUnknownFields, set on the ingest request body,
@@ -111,17 +113,20 @@ func (e *Event) UnmarshalJSON(data []byte) error {
 		e.Timestamp = ts
 		delete(raw, "timestamp")
 	}
-	if v, ok := raw["distinct_id"]; ok {
-		if err := json.Unmarshal(v, &e.DistinctID); err != nil {
-			return fmt.Errorf("distinct_id: %w", err)
+	if v, key, ok := takeFirst(raw, "anonymous_id", "anonymousId"); ok {
+		if err := json.Unmarshal(v, &e.AnonymousID); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
 		}
-		delete(raw, "distinct_id")
 	}
-	if v, ok := raw["session_id"]; ok {
-		if err := json.Unmarshal(v, &e.SessionID); err != nil {
-			return fmt.Errorf("session_id: %w", err)
+	if v, key, ok := takeFirst(raw, "user_id", "userId"); ok {
+		if err := json.Unmarshal(v, &e.UserID); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
 		}
-		delete(raw, "session_id")
+	}
+	if v, key, ok := takeFirst(raw, "session_id", "sessionId"); ok {
+		if err := json.Unmarshal(v, &e.SessionID); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
 	}
 	if v, ok := raw["properties"]; ok {
 		e.Properties = v
@@ -148,6 +153,16 @@ func (e *Event) UnmarshalJSON(data []byte) error {
 	}
 	e.Extras = merged
 	return nil
+}
+
+func takeFirst(raw map[string]json.RawMessage, keys ...string) (json.RawMessage, string, bool) {
+	for _, key := range keys {
+		if v, ok := raw[key]; ok {
+			delete(raw, key)
+			return v, key, true
+		}
+	}
+	return nil, "", false
 }
 
 // parseTimestamp accepts a JSON string (ISO 8601 / RFC 3339) or a JSON number

@@ -129,6 +129,8 @@ Set in `config/deploy.yml` under `env.clear` (non-secret) or `env.secret`
 | `DLQ_DEPTH_503_THRESHOLD` | `100000` | `failed_events` depth above which `/healthz` returns `503`. |
 | `ALLOWED_ORIGINS` | *(empty → `*`)* | Comma-separated exact origins for CORS on ingest/API. |
 | `QUERY_MAX_BODY_BYTES` | `262144` | Max query request body (256 KiB). |
+| `QUERY_MAX_RESULT_ROWS` | `1000` | Max rows ClickHouse may return for API, MCP, and playground queries. |
+| `QUERY_MAX_EXECUTION_TIME` | `1m` | Max ClickHouse query runtime for API, MCP, and playground queries. |
 
 ## Operator actions
 

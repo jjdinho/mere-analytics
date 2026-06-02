@@ -109,7 +109,7 @@ func getProjectQuery(schema *query.SchemaProvider, logger *slog.Logger) http.Han
 		renderProjectQuery(w, r, sess, views.ProjectQueryData{
 			Project:   proj,
 			PageTitle: proj.Name + " query",
-			SQL:       "SELECT timestamp, event, distinct_id, properties FROM events_raw_v1 ORDER BY timestamp DESC LIMIT 100",
+			SQL:       "SELECT timestamp, event, distinct_id, properties FROM events ORDER BY timestamp DESC LIMIT 100",
 			Schema:    catalog,
 		})
 	}

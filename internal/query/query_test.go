@@ -28,7 +28,7 @@ func TestExecutorPassesRequestContextAndUnmodifiedSQL(t *testing.T) {
 	q := &captureQuerier{t: t}
 	exec := NewExecutor(q, "analytics")
 	ctx := context.WithValue(context.Background(), contextKey{}, "request-context")
-	sqlText := "SELECT count() FROM events_raw_v1"
+	sqlText := "SELECT count() FROM events"
 
 	_, err := exec.Collect(ctx, "00000000-0000-0000-0000-000000000001", sqlText, 10)
 	if err == nil {
@@ -44,10 +44,26 @@ func TestAdditionalTableFilters(t *testing.T) {
 	got := exec.additionalTableFilters("00000000-0000-0000-0000-000000000001")
 	for _, want := range []string{
 		"'analytics.events_raw_v1'",
+		"'analytics.identity_links_v1'",
+		"'analytics.persons_state'",
+		"'analytics.sessions_state'",
+		"'analytics.identity_links_mv'",
+		"'analytics.persons_mv'",
+		"'analytics.sessions_mv'",
 		"project_id = ''00000000-0000-0000-0000-000000000001''",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("additional_table_filters %q missing %q", got, want)
 		}
+	}
+}
+
+func TestExecutorDefaultLimits(t *testing.T) {
+	exec := NewExecutor(&captureQuerier{t: t}, "analytics")
+	if exec.MaxExecutionTime != 60 {
+		t.Fatalf("MaxExecutionTime default = %d, want 60", exec.MaxExecutionTime)
+	}
+	if exec.MaxResultRows != 1000 {
+		t.Fatalf("MaxResultRows default = %d, want 1000", exec.MaxResultRows)
 	}
 }

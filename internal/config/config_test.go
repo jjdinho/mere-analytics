@@ -48,6 +48,12 @@ func TestLoad_happyPathAppliesDefaults(t *testing.T) {
 	if c.ClickHouseReadonlyUser != "mere_readonly" {
 		t.Errorf("ClickHouseReadonlyUser default: got %q want mere_readonly", c.ClickHouseReadonlyUser)
 	}
+	if c.QueryMaxResultRows != 1000 {
+		t.Errorf("QueryMaxResultRows default: got %d want 1000", c.QueryMaxResultRows)
+	}
+	if c.QueryMaxExecutionTime.String() != "1m0s" {
+		t.Errorf("QueryMaxExecutionTime default: got %s want 1m0s", c.QueryMaxExecutionTime)
+	}
 }
 
 func TestLoad_missingRequiredVars(t *testing.T) {
@@ -90,6 +96,32 @@ func TestLoad_rejectsBadPort(t *testing.T) {
 	setEnv(t, env)
 	if _, err := Load(); err == nil {
 		t.Fatal("PORT=0: expected error")
+	}
+}
+
+func TestLoad_rejectsBadQueryLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"zero_rows", map[string]string{"QUERY_MAX_RESULT_ROWS": "0"}, "QUERY_MAX_RESULT_ROWS"},
+		{"zero_timeout", map[string]string{"QUERY_MAX_EXECUTION_TIME": "0s"}, "QUERY_MAX_EXECUTION_TIME"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnv()
+			for k, v := range tc.env {
+				env[k] = v
+			}
+			setEnv(t, env)
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load: expected error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should mention %s: %v", tc.want, err)
+			}
+		})
 	}
 }
 

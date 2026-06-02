@@ -19,9 +19,9 @@ import (
 )
 
 const (
-	defaultMaxExecutionTime = 30
+	defaultMaxExecutionTime = 60
 	defaultMaxMemoryUsage   = 4 * 1024 * 1024 * 1024
-	defaultMaxResultRows    = 1_000_000
+	defaultMaxResultRows    = 1_000
 )
 
 var (
@@ -40,14 +40,12 @@ type Querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-// Table is an allowlisted analytics table. Name is what users see in the
-// schema response; QualifiedName is the safely quoted table for metadata
-// reads; FilterName is the unquoted database.table key ClickHouse expects in
-// additional_table_filters.
+// Table is an allowlisted analytics object. Name is what users see in the
+// schema response; QualifiedName is the safely quoted table/view for metadata
+// reads.
 type Table struct {
 	Name          string
 	QualifiedName string
-	FilterName    string
 }
 
 // Column describes one query output or schema column.
@@ -74,8 +72,9 @@ type Result struct {
 // Executor runs user SQL through the readonly ClickHouse pool with project
 // filters and bounded resource settings.
 type Executor struct {
-	db     Querier
-	tables []Table
+	db          Querier
+	tables      []Table
+	filterNames []string
 
 	MaxExecutionTime int
 	MaxMemoryUsage   uint64
@@ -83,18 +82,31 @@ type Executor struct {
 }
 
 // NewExecutor builds an executor over the readonly ClickHouse pool. database
-// is usually "analytics"; the allowlist currently contains only events_raw_v1.
+// is usually "analytics". The public allowlist exposes only the curated
+// events/persons/sessions surface; filterNames holds the hidden physical
+// tables those views read so tenant isolation still anchors to real storage.
 func NewExecutor(db Querier, database string) *Executor {
 	if strings.TrimSpace(database) == "" {
 		database = "analytics"
 	}
+	table := func(name string) Table {
+		return Table{
+			Name:          name,
+			QualifiedName: quoteIdent(database) + "." + quoteIdent(name),
+		}
+	}
 	return &Executor{
-		db: db,
-		tables: []Table{{
-			Name:          "events_raw_v1",
-			QualifiedName: quoteIdent(database) + "." + quoteIdent("events_raw_v1"),
-			FilterName:    database + "." + "events_raw_v1",
-		}},
+		db:     db,
+		tables: []Table{table("events"), table("persons"), table("sessions")},
+		filterNames: []string{
+			database + "." + "events_raw_v1",
+			database + "." + "identity_links_v1",
+			database + "." + "persons_state",
+			database + "." + "sessions_state",
+			database + "." + "identity_links_mv",
+			database + "." + "persons_mv",
+			database + "." + "sessions_mv",
+		},
 		MaxExecutionTime: defaultMaxExecutionTime,
 		MaxMemoryUsage:   defaultMaxMemoryUsage,
 		MaxResultRows:    defaultMaxResultRows,
@@ -202,10 +214,10 @@ func (e *Executor) contextWithSettings(ctx context.Context, projectID string) co
 }
 
 func (e *Executor) additionalTableFilters(projectID string) string {
-	parts := make([]string, 0, len(e.tables))
+	parts := make([]string, 0, len(e.filterNames))
 	filter := "project_id = " + quoteString(projectID)
-	for _, table := range e.tables {
-		parts = append(parts, quoteString(table.FilterName)+": "+quoteString(filter))
+	for _, name := range e.filterNames {
+		parts = append(parts, quoteString(name)+": "+quoteString(filter))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }

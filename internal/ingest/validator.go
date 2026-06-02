@@ -23,7 +23,9 @@ type ValidationError struct {
 //   - `properties` / `extras` default to `{}` if absent or empty so the
 //     ClickHouse String column never lands a NULL.
 //
-// Distinct_id and session_id stay optional (Nullable in events_raw_v1).
+// anonymous_id, user_id, and session_id stay optional (Nullable in
+// events_raw_v1). Events without identity are queryable but do not contribute
+// to persons.
 func ValidateBatch(events []Event) (valid []Event, rejected []ValidationError) {
 	valid = make([]Event, 0, len(events))
 	for i, e := range events {
