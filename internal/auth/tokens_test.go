@@ -24,6 +24,25 @@ func TestGeneratePublicToken_FormatAndLength(t *testing.T) {
 	}
 }
 
+func TestGeneratePublicToken_RandomPartIsAlphanumeric(t *testing.T) {
+	// The mere_pub_ prefix carries deliberate underscores, but the random
+	// secret that follows must be strictly [A-Za-z0-9] — no '-', '_', or other
+	// special characters. Loop so a single lucky draw can't pass a regression.
+	for i := 0; i < 100; i++ {
+		plain, _, err := GeneratePublicToken()
+		if err != nil {
+			t.Fatalf("GeneratePublicToken: %v", err)
+		}
+		random := strings.TrimPrefix(plain, PublicTokenPrefix)
+		for _, r := range random {
+			alnum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+			if !alnum {
+				t.Fatalf("random part has non-alphanumeric char %q: %s", r, random)
+			}
+		}
+	}
+}
+
 func TestGeneratePublicToken_UniquePerCall(t *testing.T) {
 	a, _, _ := GeneratePublicToken()
 	b, _, _ := GeneratePublicToken()

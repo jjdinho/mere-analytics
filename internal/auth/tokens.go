@@ -38,13 +38,14 @@ import (
 // being scanner-visible is fine.
 const PublicTokenPrefix = "mere_pub_"
 
-// tokenRandomBytes is the number of CSPRNG bytes per token before base64url
-// encoding. 32 bytes → 43 RawURLEncoding chars → ~2^256 guess space.
+// tokenRandomBytes is the number of CSPRNG bytes per token before encoding.
+// 32 bytes → ~2^256 guess space, regardless of the encoding used below.
 const tokenRandomBytes = 32
 
 // PublicTokenPlaintextLength is the exact length of a valid plaintext public
-// ingest token: 9 (prefix) + 43 (RawURLEncoding of 32 random bytes) = 52.
-const PublicTokenPlaintextLength = len(PublicTokenPrefix) + 43
+// ingest token: 9 (prefix) + 64 (hex of 32 random bytes) = 73. Hex keeps the
+// random part strictly alphanumeric ([0-9a-f]) — no '-' or '_'.
+const PublicTokenPlaintextLength = len(PublicTokenPrefix) + 64
 
 // InviteTokenPlaintextLength is the length of an invite token (no prefix).
 const InviteTokenPlaintextLength = 43
@@ -57,7 +58,10 @@ func GeneratePublicToken() (plaintext, hashHex string, err error) {
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", "", fmt.Errorf("token: read random: %w", err)
 	}
-	plaintext = PublicTokenPrefix + base64.RawURLEncoding.EncodeToString(b[:])
+	// Hex (not base64url) so the random part is strictly alphanumeric: the
+	// token rides in client HTML/snippets and copy-paste, where '-'/'_' are
+	// awkward (e.g. word-select breaks on '-').
+	plaintext = PublicTokenPrefix + hex.EncodeToString(b[:])
 	return plaintext, HashToken(plaintext), nil
 }
 
