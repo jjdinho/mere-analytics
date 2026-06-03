@@ -14,9 +14,10 @@ import (
 	"github.com/jjdinho/mere-analytics/internal/testhelpers"
 )
 
-// TestBuild_ServesAndCloses is the ADR-0003 green gate: Build runs the full real
-// boot sequence against live PG + CH and returns a wired App whose Handler
-// serves /healthz, and Close releases the pools/pipeline cleanly (idempotently).
+// TestBuild_ServesAndCloses is the composition-root green gate: Build runs the
+// full real boot sequence against live PG + CH and returns a wired App whose
+// Handler serves /healthz, and Close releases the pools/pipeline cleanly
+// (idempotently).
 func TestBuild_ServesAndCloses(t *testing.T) {
 	pgPool, pgCfg := testhelpers.StartPostgres(t)
 	pgPool.Close() // Build opens its own pool from the env below

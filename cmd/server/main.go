@@ -1,7 +1,7 @@
 // Command mere-server is the analytics application binary. The whole boot
-// sequence and SIGTERM choreography live in the importable app package
-// (ADR-0003); main is a thin shim that constructs the logger and forwards its
-// build-time Version stamp.
+// sequence and SIGTERM choreography live in the importable app package; main is
+// a thin shim that constructs the logger and forwards its build-time Version
+// stamp.
 package main
 
 import (

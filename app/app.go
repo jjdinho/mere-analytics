@@ -1,9 +1,8 @@
 // Package app is the importable composition root: the single exported entry
 // point that builds and runs the fully-wired mere application. Everything else
-// stays under internal/ (ADR-0003). A wrapper module (e.g. the private
-// mere-cloud hosted layer) depends on exactly two exported packages — this one
-// to build + run, and extension for the seam types — and never imports the
-// internals directly.
+// stays under internal/. A wrapper module depends on exactly two exported
+// packages — this one to build + run, and extension for the seam types — and
+// never imports the internals directly (see docs/extending.md).
 //
 // The boot sequence and the three-phase SIGTERM choreography are core behavior,
 // so they live here rather than in cmd/server, which collapses to a thin shim.

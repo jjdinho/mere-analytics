@@ -7,12 +7,12 @@ open a pull request.
 
 ## Why this matters here
 
-mere's core is licensed under **AGPL-3.0-or-later**
-([ADR-0001](docs/adr/0001-adopt-agpl-3.0.md)). We also run a **paid hosted
-build** of the same code, which links a small amount of proprietary glue
-([ADR-0002](docs/adr/0002-open-core-hosted-wrapper.md)). That hosted build is
-legal only because the maintainers hold the copyright to the whole core and can
-license it to themselves under separate terms — classic dual-licensing.
+**This repository is mere's core** — the whole self-hostable product — licensed
+under **AGPL-3.0-or-later**. We also run a **paid hosted build** of the same
+code, which links a small amount of proprietary glue that does not live here.
+That hosted build is legal only because the maintainers hold the copyright to
+the whole core and can license it to themselves under separate terms — classic
+dual-licensing.
 
 A patch that lands without granting us that same flexibility becomes AGPL-only,
 and from that moment the hosted build can no longer legally link the core. To
@@ -59,9 +59,7 @@ under anything but AGPL. So, in addition to the DCO:
 
 You keep the copyright to your contribution. This is a license grant, **not** an
 assignment — you remain free to use your own code however you like. It simply
-lets us keep offering mere both as AGPL open source and as our hosted build, the
-way [ADR-0001](docs/adr/0001-adopt-agpl-3.0.md) and
-[ADR-0002](docs/adr/0002-open-core-hosted-wrapper.md) describe.
+lets us keep offering mere both as AGPL open source and as our hosted build.
 
 If you cannot make this grant for a particular contribution, please say so in
 the pull request **before** we review it, rather than signing off.

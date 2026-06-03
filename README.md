@@ -68,8 +68,8 @@ the environment reference, operator actions, backups, and migration recovery.
 - **[docs/api.md](docs/api.md)** — the public HTTP + MCP API reference.
 - **[docs/self-host.md](docs/self-host.md)** — how to run it in production.
 - **[docs/architecture.md](docs/architecture.md)** — how it's built and why.
-- **[docs/adr/](docs/adr/)** — architecture decision records (licensing,
-  open-core, the extension-seam contract).
+- **[docs/extending.md](docs/extending.md)** — the extension seams and how to
+  build your own binary that injects custom behavior without forking.
 
 ## Contributing
 
@@ -84,6 +84,4 @@ sign-off requirement and the contribution license grant before you open a PR.
 self-hoster's rights are unrestricted. The network-copyleft (AGPL §13) means
 anyone who offers a **modified** mere as a network service must share their
 modifications. A separately-run hosted version is offered for those who'd rather
-not operate it themselves. The licensing and open-core rationale are recorded in
-[ADR-0001](docs/adr/0001-adopt-agpl-3.0.md) and
-[ADR-0002](docs/adr/0002-open-core-hosted-wrapper.md).
+not operate it themselves.
