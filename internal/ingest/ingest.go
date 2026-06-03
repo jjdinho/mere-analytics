@@ -214,9 +214,9 @@ type Options struct {
 	DLQDepth503Threshold int
 
 	// UsageSink is the extension seam called after a batch durably lands in
-	// ClickHouse, with (projectID, eventCount), so a hosted build can meter for
-	// billing (ADR-0002). Nil defaults to the no-op extension.Discard, so the
-	// open-source build counts nothing.
+	// ClickHouse, with (projectID, eventCount), so a wrapper can meter per-tenant
+	// volume (see docs/extending.md). Nil defaults to the no-op extension.Discard,
+	// so the open-source build counts nothing.
 	UsageSink extension.UsageSink
 }
 

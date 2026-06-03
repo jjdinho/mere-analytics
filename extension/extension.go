@@ -1,12 +1,11 @@
 // Package extension holds the core's in-process extension seams: the small,
 // stable set of interfaces (plus no-op defaults) a wrapper can implement to add
-// hosted concerns without modifying the core. It is the ONLY package outside
-// internal/ — everything else stays unimportable on purpose — because a separate
-// module (e.g. the private mere-cloud hosted layer, see
-// docs/adr/0002-open-core-hosted-wrapper.md) must be able to name these types
-// and inject implementations. Keep this package tiny: interfaces and no-op
-// structs, no behavior. Adding to it is API surface and a potential breaking
-// change for wrappers.
+// behavior without modifying the core. It is the ONLY package outside internal/
+// — everything else stays unimportable on purpose — because a separate module
+// must be able to name these types and inject implementations (see
+// docs/extending.md). Keep this package tiny: interfaces and no-op structs, no
+// behavior. Adding to it is API surface and a potential breaking change for
+// wrappers.
 package extension
 
 import (

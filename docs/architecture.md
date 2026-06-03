@@ -1,8 +1,8 @@
 # mere — architecture
 
 How the server is built, as shipped. For the request/response contracts see
-[api.md](api.md); for the larger cross-cutting design decisions and their
-rationale see the [ADRs](adr/). This document describes the system as it
+[api.md](api.md); for the extension seams and how to build on them see
+[extending.md](extending.md). This document describes the system as it
 actually exists in the code.
 
 ## Shape
@@ -49,7 +49,7 @@ scoped data-access object), enforces CSRF on non-GET web routes, and runs the
 - **`/api/v1/ingest/events`** wraps `requirePublicToken` + `MaxBody` + `CORS`.
 
 Once the tenant is resolved on the ingest and query/MCP chains, an
-`extension.RateLimiter` seam is consulted (ADR-0002); the open-source build ships
+`extension.RateLimiter` seam is consulted (see [extending.md](extending.md)); the open-source build ships
 the no-op allow-all default, so there is no rate limiting here — only a generic
 extension point. A denied request gets `429` + `Retry-After` and the handler
 never runs.
@@ -129,7 +129,7 @@ Reliability is layered:
 After a batch durably lands in ClickHouse — at the primary flush or, for events
 that first failed, at the successful DLQ drain — an `extension.UsageSink` seam is
 notified with `(projectID, eventCount)` so a hosted build can meter per-tenant
-volume for billing (ADR-0002). Each event is counted exactly once, at its first
+volume for billing. Each event is counted exactly once, at its first
 successful insert; the open-source build ships the no-op discard default, so it
 counts nothing.
 
@@ -171,8 +171,8 @@ double panic-recovery so a library bug can't crash the process.
 
 The boot sequence and the three-phase SIGTERM choreography live in the
 importable `app` package (`app.Build` / `app.Run`); `cmd/server/main.go` is a
-thin shim that constructs the logger and forwards its `Version` stamp
-(ADR-0003). `app.Build`:
+thin shim that constructs the logger and forwards its `Version` stamp.
+`app.Build`:
 
 ```
 env → config.Load → pg.Open → migrate.Run(pg) →
@@ -185,7 +185,7 @@ version. The build-time `Version` (`git describe`, injected via `-ldflags` into
 `cmd/server` and passed through `app.WithVersion`) is logged on boot and
 returned in the `/healthz` body. Promoting the wiring into `app` lets a separate
 wrapper module compose the same boot sequence and inject the `extension` seams
-without forking (ADR-0002).
+without forking (see [extending.md](extending.md)).
 
 ## Deploy
 

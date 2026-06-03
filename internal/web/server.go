@@ -63,9 +63,9 @@ type Options struct {
 	MCPHandler http.Handler
 
 	// RateLimiter is the extension seam consulted on the ingest and query/MCP
-	// paths after the tenant is resolved (ADR-0002). Nil defaults to the no-op
-	// extension.AllowAll, so the open-source build's behavior is unchanged; a
-	// hosted wrapper or self-hoster injects a real limiter here.
+	// paths after the tenant is resolved (see docs/extending.md). Nil defaults to
+	// the no-op extension.AllowAll, so the open-source build's behavior is
+	// unchanged; a wrapper or self-hoster injects a real limiter here.
 	RateLimiter extension.RateLimiter
 }
 
