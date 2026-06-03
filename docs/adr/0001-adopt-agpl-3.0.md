@@ -7,9 +7,9 @@
 ## Context
 
 mere is open source and self-hostable: a self-hoster gets the whole product,
-with no cloud-only tier (README; [plan.md](../plan.md) "Self-hosters get the
-full product"). We also intend to offer a **paid hosted version** of the same
-software — see [ADR-0002](0002-open-core-hosted-wrapper.md).
+with no cloud-only tier (see the README). We also intend to offer a **paid
+hosted version** of the same software — see
+[ADR-0002](0002-open-core-hosted-wrapper.md).
 
 The repo currently declares **Apache 2.0**. Apache is maximally permissive:
 anyone — including a well-funded cloud vendor — can take mere, run it as a

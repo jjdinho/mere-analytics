@@ -10,8 +10,7 @@ import (
 )
 
 // getAccountPassword renders the change-password form. The banner is shown
-// only when session.MustChangePassword is set (the operator-reset path) —
-// TODO 3 in plan.md / the review.
+// only when session.MustChangePassword is set (the operator-reset path).
 func getAccountPassword() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := auth.SessionFrom(r.Context())
