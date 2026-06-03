@@ -334,6 +334,39 @@ func TestMCPTools_SoftDeletedProjectDenied(t *testing.T) {
 	}
 }
 
+// denyEntitlement is an Entitlement seam that locks every project — standing
+// in for a hosted build's "over 1M events and unpaid" decision.
+type denyEntitlement struct{ reason string }
+
+func (d denyEntitlement) AllowAnalysis(context.Context, string) (bool, string) {
+	return false, d.reason
+}
+
+// TestMCPTools_OverQuotaDenied proves the analysis gate (extension.Entitlement)
+// is consulted after visibility: a project that resolves fine still has its
+// query + schema tools denied with the upgrade hint when the seam says no.
+func TestMCPTools_OverQuotaDenied(t *testing.T) {
+	s := newStack(t)
+	s.deps.Entitlement = denyEntitlement{reason: "over 1M events this month — upgrade to continue"}
+	srv := s.serverAs(t, s.userID, s.projectA)
+
+	for _, tc := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"query", map[string]any{"sql": "SELECT count() FROM events"}},
+		{"schema", nil},
+	} {
+		res := callTool(t, srv, tc.tool, tc.args)
+		if res.rpcErr != nil {
+			t.Fatalf("%s: unexpected jsonrpc error: %+v", tc.tool, res.rpcErr)
+		}
+		if !res.isError || !strings.Contains(res.text, "upgrade to continue") {
+			t.Errorf("%s: want tool error carrying the upgrade hint, got isError=%v text=%q", tc.tool, res.isError, res.text)
+		}
+	}
+}
+
 // TestMCPTools_QueryErrors covers the tool-error surface: a ClickHouse parse
 // error comes back verbatim, an empty SQL string is rejected, and breaching
 // the row cap tells the model to add a LIMIT — all as tool errors the model

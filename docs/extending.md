@@ -1,11 +1,11 @@
 # Extending mere
 
 mere ships as a complete product: you run the binary as-is and get the whole
-thing. But two concerns deliberately have **no behavior in the open-source
-build** — per-tenant rate limiting and usage metering — because what they should
-do depends entirely on how you operate the server. Rather than guess, the core
-leaves them as **extension seams**: small, stable interfaces with no-op defaults
-that you can replace by compiling your own build.
+thing. But three concerns deliberately have **no behavior in the open-source
+build** — per-tenant rate limiting, usage metering, and analysis gating —
+because what they should do depends entirely on how you operate the server.
+Rather than guess, the core leaves them as **extension seams**: small, stable
+interfaces with no-op defaults that you can replace by compiling your own build.
 
 This document explains why those seams exist, the contract each one makes, and
 how to build a binary that injects your own implementations — **without forking
@@ -32,22 +32,23 @@ Only two packages are exported, and they are the entire contract you depend on:
 
 | Package | What it gives you |
 |---|---|
-| [`extension`](../extension/extension.go) | The seam interfaces (`RateLimiter`, `UsageSink`) and their no-op defaults (`AllowAll`, `Discard`). |
+| [`extension`](../extension/extension.go) | The seam interfaces (`RateLimiter`, `UsageSink`, `Entitlement`) and their no-op defaults (`AllowAll`, `Discard`, `Unlimited`). |
 | [`app`](../app/app.go) | The composition root: `Build`/`Run`, which wire and start the fully-assembled server and let you inject the seams. |
 
 Everything else — `web`, `auth`, `oauth`, `ingest`, `query`, `clickhouse`,
 `postgres`, `config` — stays internal and is free to change between releases.
 You never import it directly, so refactors upstream don't break you.
 
-The same two seams are how a separately-run hosted version of mere is built:
-pure addition over an unmodified core, no fork. They are generic extension
-points, equally available to anyone self-hosting.
+These same seams are how a separately-run hosted version of mere is built: pure
+addition over an unmodified core, no fork. They are generic extension points,
+equally available to anyone self-hosting.
 
-## The two seams
+## The three seams
 
-Both live in [`extension/extension.go`](../extension/extension.go). Each is one
+All live in [`extension/extension.go`](../extension/extension.go). Each is one
 interface plus a no-op default; the open-source build wires the defaults, so
-out of the box there is no rate limiting and nothing is metered.
+out of the box there is no rate limiting, nothing is metered, and analysis is
+never gated.
 
 ### `RateLimiter` — allow or deny a request
 
@@ -106,6 +107,43 @@ type UsageSink interface {
 Typical use: increment a per-project counter in Postgres or a metrics system, or
 emit a usage record for invoicing.
 
+### `Entitlement` — gate the analysis surfaces
+
+Consulted on the **read/analysis surfaces** — the REST `query` + `schema`
+endpoints, the MCP `query` + `schema` tools, and the web query playground —
+after the project has been resolved:
+
+```go
+type Entitlement interface {
+	// AllowAnalysis reports whether projectID may use the analysis surfaces
+	// right now. reason is a short hint surfaced on denial (empty = generic
+	// default).
+	AllowAnalysis(ctx context.Context, projectID string) (ok bool, reason string)
+}
+```
+
+- It is consulted **only** on the analysis surfaces. **Ingest is never gated** —
+  so a hosted build can keep durably accepting a tenant's events while denying
+  analysis until they pay. This is the seam's whole reason to exist: "collect,
+  but lock reads."
+- It runs *after* the project is resolved and its visibility confirmed, so a
+  denial can never reveal a project the caller couldn't already see.
+- On deny (`ok == false`): the **API and MCP** surfaces return `402 Payment
+  Required` (the API as a `402`, MCP as a tool error carrying `reason`); the
+  **web playground** redirects to your upgrade page (see `WithUpgradeURL` below),
+  or — if none is set — also answers `402`. The wrapped handler never runs.
+- `AllowAnalysis` is on the request hot path: it MUST be safe for concurrent
+  use and MUST NOT block beyond a small, bounded check.
+- The default, `extension.Unlimited`, allows every project to analyze.
+
+This is deliberately distinct from `RateLimiter`: a `429` means "retry later",
+whereas a `402` here means "this project is over its plan — pay to continue",
+which persists until the tenant upgrades.
+
+Typical use: a hosted build denies a project once its month-to-date volume
+(counted via `UsageSink`) crosses the free allowance and no active subscription
+is on file, then flips back to allow once they subscribe.
+
 ## The composition root
 
 [`app`](../app/app.go) is the single entry point that builds the whole server —
@@ -130,6 +168,8 @@ func WithLogger(l *slog.Logger) Option
 func WithVersion(v string) Option                                       // build stamp for /healthz
 func WithRateLimiter(rl extension.RateLimiter) Option                   // default extension.AllowAll
 func WithUsageSink(us extension.UsageSink) Option                       // default extension.Discard
+func WithEntitlement(e extension.Entitlement) Option                    // default extension.Unlimited
+func WithUpgradeURL(url string) Option                                  // web-playground redirect on 402
 func WithHandlerMiddleware(mw ...func(http.Handler) http.Handler) Option // wrap the outer handler
 
 func Build(ctx context.Context, opts ...Option) (*App, error) // wired, not yet listening

@@ -67,6 +67,18 @@ type Options struct {
 	// the no-op extension.AllowAll, so the open-source build's behavior is
 	// unchanged; a wrapper or self-hoster injects a real limiter here.
 	RateLimiter extension.RateLimiter
+
+	// Entitlement is the extension seam consulted on the analysis surfaces
+	// (REST query + schema, web playground; MCP is gated in internal/mcp) after
+	// the project resolves. Nil defaults to the no-op extension.Unlimited, so
+	// the open-source build never gates analysis. A hosted wrapper injects a
+	// real implementation to lock a project's analysis once it is over quota.
+	Entitlement extension.Entitlement
+
+	// UpgradeURL is where the web query playground redirects when Entitlement
+	// denies an over-quota project — the wrapper's branded billing/upgrade page.
+	// Empty falls back to a plain 402 (the API/MCP surfaces always answer 402).
+	UpgradeURL string
 }
 
 // Handler builds the application's root http.Handler.
@@ -80,6 +92,9 @@ func Handler(opts Options) http.Handler {
 	}
 	if opts.RateLimiter == nil {
 		opts.RateLimiter = extension.AllowAll{}
+	}
+	if opts.Entitlement == nil {
+		opts.Entitlement = extension.Unlimited{}
 	}
 
 	mux := http.NewServeMux()
@@ -117,8 +132,8 @@ func Handler(opts Options) http.Handler {
 		mux.Handle("GET /projects/{id}", auth(getProject(logger)))
 		mux.Handle("POST /projects/{id}/delete", auth(postProjectDelete(logger)))
 		if opts.QueryExecutor != nil && opts.QuerySchema != nil {
-			mux.Handle("GET /projects/{id}/query", auth(getProjectQuery(opts.QuerySchema, logger)))
-			mux.Handle("POST /projects/{id}/query", auth(MaxBody(opts.QueryMaxBodyBytes)(postProjectQuery(opts.QueryExecutor, opts.QuerySchema, logger))))
+			mux.Handle("GET /projects/{id}/query", auth(getProjectQuery(opts.Entitlement, opts.UpgradeURL, opts.QuerySchema, logger)))
+			mux.Handle("POST /projects/{id}/query", auth(MaxBody(opts.QueryMaxBodyBytes)(postProjectQuery(opts.Entitlement, opts.UpgradeURL, opts.QueryExecutor, opts.QuerySchema, logger))))
 		}
 
 		// Account / password change. The must_change_password gate inside
@@ -153,8 +168,8 @@ func Handler(opts Options) http.Handler {
 		}
 
 		if opts.QueryExecutor != nil && opts.QuerySchema != nil {
-			queryChain := cors(bearer(rateLimit(opts.RateLimiter, "query")(MaxBody(opts.QueryMaxBodyBytes)(postAPIProjectQuery(opts.AuthService, opts.QueryExecutor, logger)))))
-			schemaChain := cors(bearer(rateLimit(opts.RateLimiter, "query")(getAPIProjectSchema(opts.AuthService, opts.QuerySchema, logger))))
+			queryChain := cors(bearer(entitle(opts.Entitlement)(rateLimit(opts.RateLimiter, "query")(MaxBody(opts.QueryMaxBodyBytes)(postAPIProjectQuery(opts.AuthService, opts.QueryExecutor, logger))))))
+			schemaChain := cors(bearer(entitle(opts.Entitlement)(rateLimit(opts.RateLimiter, "query")(getAPIProjectSchema(opts.AuthService, opts.QuerySchema, logger)))))
 			mux.Handle("POST /api/v1/projects/{project_id}/query", queryChain)
 			mux.Handle("GET /api/v1/projects/{project_id}/schema", schemaChain)
 			mux.Handle("OPTIONS /api/v1/projects/{project_id}/query", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

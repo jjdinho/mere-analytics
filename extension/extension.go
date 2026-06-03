@@ -51,3 +51,24 @@ type UsageSink interface {
 type Discard struct{}
 
 func (Discard) RecordIngested(context.Context, string, int) {}
+
+// Entitlement gates the read/analysis surfaces — the REST query + schema
+// endpoints, the MCP query + schema tools, and the web query playground — after
+// the project has been resolved. The core ships Unlimited (every project may
+// analyze). It is consulted ONLY on those analysis surfaces; ingest is never
+// gated, so a hosted build can keep accepting a tenant's events while denying
+// analysis until they pay. AllowAnalysis MUST be safe for concurrent use and
+// MUST NOT block beyond a small, bounded check.
+type Entitlement interface {
+	// AllowAnalysis reports whether projectID may use the analysis surfaces
+	// right now. reason is a short human-readable hint surfaced on denial
+	// (the 402 body / MCP tool error); empty selects a generic default. On
+	// deny the core returns 402 on the API/MCP surfaces and redirects the web
+	// playground to the wrapper's upgrade URL, and the handler never runs.
+	AllowAnalysis(ctx context.Context, projectID string) (ok bool, reason string)
+}
+
+// Unlimited is the no-op default: every project may analyze.
+type Unlimited struct{}
+
+func (Unlimited) AllowAnalysis(context.Context, string) (bool, string) { return true, "" }

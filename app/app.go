@@ -44,6 +44,8 @@ type options struct {
 	version     string
 	rateLimiter extension.RateLimiter
 	usageSink   extension.UsageSink
+	entitlement extension.Entitlement
+	upgradeURL  string
 	middleware  []func(http.Handler) http.Handler
 }
 
@@ -68,6 +70,23 @@ func WithRateLimiter(rl extension.RateLimiter) Option {
 // extension.Discard.
 func WithUsageSink(us extension.UsageSink) Option {
 	return func(o *options) { o.usageSink = us }
+}
+
+// WithEntitlement injects the analysis gate consulted on the query/schema/MCP
+// and web-playground surfaces after the project resolves. Defaults to the no-op
+// extension.Unlimited, so the open-source build never gates analysis. A hosted
+// wrapper injects a real implementation to lock a project's analysis once it is
+// over quota (ingest is never gated).
+func WithEntitlement(e extension.Entitlement) Option {
+	return func(o *options) { o.entitlement = e }
+}
+
+// WithUpgradeURL sets where the web query playground redirects when the
+// Entitlement seam denies an over-quota project — the wrapper's branded
+// billing/upgrade page. Has no effect under the default extension.Unlimited
+// (which never denies); the API and MCP surfaces always answer 402 regardless.
+func WithUpgradeURL(url string) Option {
+	return func(o *options) { o.upgradeURL = url }
 }
 
 // WithHandlerMiddleware wraps the assembled root handler with edge middleware
@@ -198,6 +217,7 @@ func Build(ctx context.Context, opts ...Option) (_ *App, err error) {
 		AuthService: authSvc,
 		Executor:    queryExec,
 		Schema:      querySchema,
+		Entitlement: o.entitlement,
 		Logger:      logger,
 	})
 
@@ -217,6 +237,8 @@ func Build(ctx context.Context, opts ...Option) (_ *App, err error) {
 		QueryMaxBodyBytes:    cfg.QueryMaxBodyBytes,
 		MCPHandler:           mcpHandler,
 		RateLimiter:          o.rateLimiter,
+		Entitlement:          o.entitlement,
+		UpgradeURL:           o.upgradeURL,
 	})
 	// Wrap with wrapper-supplied edge middleware, first-listed outermost.
 	for i := len(o.middleware) - 1; i >= 0; i-- {
