@@ -1,8 +1,7 @@
 # mere — API reference
 
 The public HTTP surface and the MCP endpoint. Everything here is grounded in the
-shipped implementation; where this doc and `docs/plan.md` disagree, this doc
-(and the code) win.
+shipped implementation; where this doc and the code disagree, the code wins.
 
 ## Conventions
 

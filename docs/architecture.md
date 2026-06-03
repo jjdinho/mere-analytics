@@ -1,9 +1,9 @@
 # mere — architecture
 
-How the server is built, as shipped. For the design rationale and the full
-decision log see [plan.md](plan.md); for the request/response contracts see
-[api.md](api.md). This document describes the system as it actually exists in
-the code.
+How the server is built, as shipped. For the request/response contracts see
+[api.md](api.md); for the larger cross-cutting design decisions and their
+rationale see the [ADRs](adr/). This document describes the system as it
+actually exists in the code.
 
 ## Shape
 

@@ -2,9 +2,9 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-02
-- **Related:** [ADR-0001](0001-adopt-agpl-3.0.md) (license). Implemented by
-  [docs/plans/ratelimiter-seam.md](../plans/ratelimiter-seam.md) and
-  [docs/plans/usagesink-seam.md](../plans/usagesink-seam.md).
+- **Related:** [ADR-0001](0001-adopt-agpl-3.0.md) (license). The two seams it
+  specifies shipped in the exported `extension` package; see their as-shipped
+  description in [architecture.md](../architecture.md).
 
 ## Context
 

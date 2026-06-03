@@ -262,8 +262,55 @@ incremental, remote-object-store backups. The built-in `BACKUP TABLE …`
 statement also works but first needs a backup disk declared in
 `config/deploy/clickhouse/config.xml` (none ships by default).
 
+## Restoring from backup
+
+Restores mirror the backups above. **Restore before the instance is taking live
+traffic** — bring the accessories up, restore, *then* deploy the app (or keep
+`INGEST_DISABLED=true` until the restore completes) so nothing writes over the
+data mid-restore.
+
+**Hetzner snapshot (whole disk).** Rebuild the VPS from the snapshot in the
+Hetzner Cloud Console (Server → Rebuild from backup). Because both data
+directories share the disk, this brings Postgres and ClickHouse back to the same
+point in time together — the simplest path, and consistent by construction.
+
+**Logical restore** (from the `pg_dump` / native dumps above):
+
+```bash
+# Postgres — restore a custom-format dump. --clean drops the existing objects
+# first, so point it at the intended target database.
+kamal accessory exec postgres -i \
+  "pg_restore -U mere -d mere --clean --if-exists" < mere-pg-2026-06-03.dump
+
+# ClickHouse — the schema must already exist (the app creates it by running
+# migrations on boot), so deploy the app first, then stream the rows back in.
+kamal accessory exec clickhouse -i \
+  "clickhouse-client --query 'INSERT INTO analytics.events_raw_v1 FORMAT Native'" \
+  < mere-events-2026-06-03.native
+```
+
+A restored Postgres dump already carries the `schema_migrations` bookkeeping, so
+the next boot re-runs nothing. The ClickHouse native dump is **data only** — let
+the app create the tables via its boot migrations *before* inserting, or the
+`INSERT` has no table to target.
+
 ## Persistence
 
 Postgres and ClickHouse data live in host volumes under `/data/mere/` on the
 VPS. They survive `kamal redeploy`, `kamal app remove`, and image upgrades, and
 are lost only if you delete the directory or the VPS itself.
+
+## Troubleshooting
+
+Most failures surface in `kamal logs` and on `GET /healthz` (which returns the
+running build `version` and a status body). The recurring ones:
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| `POST /api/v1/ingest/events` returns `503` + `Retry-After: 1` | In-flight buffer hit `INGEST_EVENT_BUFFER` — normal backpressure under a spike. | Transient; clients retry. If sustained, raise `INGEST_EVENT_BUFFER` / `INGEST_FLUSH_EVENTS`, or find why ClickHouse writes are slow. |
+| Ingest **and** `/healthz` both return `503` | The ingest **fatal flag**: one flush failed to write to *both* ClickHouse and the Postgres DLQ. | Check ClickHouse and Postgres health in `kamal logs`. The flag clears itself on the next successful write — there is no manual reset. |
+| `/healthz` returns `503` but ingest still accepts events | `failed_events` (the DLQ) depth crossed `DLQ_DEPTH_503_THRESHOLD`. | Check depth: `kamal db-console` → `SELECT count(*) FROM failed_events;`. It means CH writes have been failing; fix CH and the drainer empties the DLQ on its own. |
+| `failed_events` keeps growing | ClickHouse is unreachable or erroring, so the drainer can't replay. | Fix CH connectivity/disk. The drainer replays `INGEST_DLQ_DRAIN_BATCH_LIMIT` rows per pass once CH is back, then the table shrinks. |
+| OAuth login loops, or "invalid issuer" / broken redirects | `OAUTH_ISSUER_URL` doesn't match the externally reachable URL (`proxy.host`). | Set `OAUTH_ISSUER_URL` to exactly `https://<HOSTNAME>` and redeploy. It's advertised in OAuth discovery and signed into redirects, so it must match. |
+| Container exits on boot; proxy keeps serving the old version | A migration failed — startup aborts by design, possibly leaving the version **dirty**. | Read `kamal logs` for the failing migration, then recover per [Recovering from a dirty migration](#recovering-from-a-dirty-migration). |
+| A query returns fewer rows than expected | A bearer token is bound to one `(user, project)` pair — you may be querying the wrong project's grant. | Confirm the token's project. Tenant isolation injects `project_id` server-side, so another project's data is never visible by design. |

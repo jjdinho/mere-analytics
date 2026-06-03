@@ -68,7 +68,6 @@ the environment reference, operator actions, backups, and migration recovery.
 - **[docs/api.md](docs/api.md)** — the public HTTP + MCP API reference.
 - **[docs/self-host.md](docs/self-host.md)** — how to run it in production.
 - **[docs/architecture.md](docs/architecture.md)** — how it's built and why.
-- **[docs/plan.md](docs/plan.md)** — the design plan and decision log.
 - **[docs/adr/](docs/adr/)** — architecture decision records (licensing,
   open-core, the extension-seam contract).
 

@@ -4,8 +4,7 @@
 - **Date:** 2026-06-02
 - **Related:** [ADR-0002](0002-open-core-hosted-wrapper.md) (this is the
   "packaging prerequisite" called out in its Consequences). The seam *types* it
-  references land with [docs/plans/ratelimiter-seam.md](../plans/ratelimiter-seam.md)
-  and [docs/plans/usagesink-seam.md](../plans/usagesink-seam.md).
+  references shipped in the exported `extension` package.
 
 ## Context
 

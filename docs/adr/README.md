@@ -6,11 +6,9 @@ append-only — a decision that is later reversed gets a new ADR that supersedes
 the old one (which stays on disk, marked `Superseded`), so the reasoning is
 never lost.
 
-This complements the [decisions log in plan.md](../plan.md#decisions-log-resolved-open-questions),
-which is a one-line-per-decision table for *implementation* choices made while
-building each step. ADRs are for the larger, cross-cutting decisions that need a
-paragraph of "why" and a record of the options not taken. Where a plan.md
-decision-log row needs that depth, it points here.
+ADRs are reserved for the larger, cross-cutting decisions that need a paragraph
+of "why" and a record of the options not taken — not every day-to-day
+implementation choice.
 
 ## Format
 
