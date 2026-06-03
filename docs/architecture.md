@@ -48,6 +48,12 @@ scoped data-access object), enforces CSRF on non-GET web routes, and runs the
   bypassing the cookie/CSRF machinery entirely.
 - **`/api/v1/ingest/events`** wraps `requirePublicToken` + `MaxBody` + `CORS`.
 
+Once the tenant is resolved on the ingest and query/MCP chains, an
+`extension.RateLimiter` seam is consulted (ADR-0002); the open-source build ships
+the no-op allow-all default, so there is no rate limiting here — only a generic
+extension point. A denied request gets `429` + `Retry-After` and the handler
+never runs.
+
 Routing is stdlib `net/http` with the Go 1.22+ pattern mux — no third-party
 router. The whole HTTP surface is assembled in `internal/web/server.go`.
 
@@ -120,6 +126,13 @@ Reliability is layered:
   `INGEST_SHUTDOWN_GRACE`, and any residual events are written to the DLQ before
   exit. `kamal-proxy`'s `drain_timeout` (30s) is set to exceed this budget.
 
+After a batch durably lands in ClickHouse — at the primary flush or, for events
+that first failed, at the successful DLQ drain — an `extension.UsageSink` seam is
+notified with `(projectID, eventCount)` so a hosted build can meter per-tenant
+volume for billing (ADR-0002). Each event is counted exactly once, at its first
+successful insert; the open-source build ships the no-op discard default, so it
+counts nothing.
+
 ClickHouse-side `async_insert` (configured in `config.xml`) batches small
 inserts again at the server; the two layers are complementary.
 
@@ -156,7 +169,10 @@ double panic-recovery so a library bug can't crash the process.
 
 ## Boot sequence
 
-`cmd/server/main.go`:
+The boot sequence and the three-phase SIGTERM choreography live in the
+importable `app` package (`app.Build` / `app.Run`); `cmd/server/main.go` is a
+thin shim that constructs the logger and forwards its `Version` stamp
+(ADR-0003). `app.Build`:
 
 ```
 env → config.Load → pg.Open → migrate.Run(pg) →
@@ -165,8 +181,11 @@ env → config.Load → pg.Open → migrate.Run(pg) →
 ```
 
 Failure at any step aborts startup; `kamal-proxy` keeps routing to the prior
-version. The build-time `Version` (`git describe`, injected via `-ldflags`) is
-logged on boot and returned in the `/healthz` body.
+version. The build-time `Version` (`git describe`, injected via `-ldflags` into
+`cmd/server` and passed through `app.WithVersion`) is logged on boot and
+returned in the `/healthz` body. Promoting the wiring into `app` lets a separate
+wrapper module compose the same boot sequence and inject the `extension` seams
+without forking (ADR-0002).
 
 ## Deploy
 
@@ -181,8 +200,10 @@ ClickHouse run as Kamal accessories with data on host volumes under
 
 | Package | Responsibility |
 |---|---|
-| `cmd/server` | Entry point; dependency wiring; boot sequence. |
+| `cmd/server` | Entry-point shim; forwards the build-time `Version` into `app`. |
 | `cmd/maintenance` | One-shot expired-row sweeper. |
+| `app` | Importable composition root: boot sequence + SIGTERM choreography; seam injection points. |
+| `extension` | Exported in-process extension seams (`RateLimiter`, `UsageSink`) + no-op defaults; the only non-`internal/` package. |
 | `internal/web` | HTTP handlers, middleware, route assembly. |
 | `internal/auth` | Sessions, password hashing, CSRF, tokens, the `Viewer`. |
 | `internal/oauth` | OAuth 2.1 server: clients, codes, access tokens, PKCE. |

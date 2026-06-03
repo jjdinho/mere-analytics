@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 
+	"github.com/jjdinho/mere-analytics/extension"
 	"github.com/jjdinho/mere-analytics/internal/auth"
 	"github.com/jjdinho/mere-analytics/internal/clickhouse"
 	"github.com/jjdinho/mere-analytics/internal/config"
@@ -54,7 +55,17 @@ func startIngestStack(t *testing.T, opts ...func(*ingest.Options)) *ingestStack 
 	t.Helper()
 	pgPool, pgCfg := testhelpers.StartPostgres(t)
 	chAdmin, chCfg := testhelpers.StartClickHouse(t)
-	return assembleIngestStack(t, pgPool, pgCfg, chAdmin, chCfg, nil, nil, opts...)
+	return assembleIngestStack(t, pgPool, pgCfg, chAdmin, chCfg, nil, nil, nil, opts...)
+}
+
+// startIngestStackWithLimiter is startIngestStack with a RateLimiter injected
+// into the web handler, so the rate-limit seam can be exercised on the real
+// ingest chain (after requirePublicToken resolves the tenant).
+func startIngestStackWithLimiter(t *testing.T, limiter extension.RateLimiter, opts ...func(*ingest.Options)) *ingestStack {
+	t.Helper()
+	pgPool, pgCfg := testhelpers.StartPostgres(t)
+	chAdmin, chCfg := testhelpers.StartClickHouse(t)
+	return assembleIngestStack(t, pgPool, pgCfg, chAdmin, chCfg, nil, nil, limiter, opts...)
 }
 
 // startIngestChaosStack is startIngestStack with the raw container handles
@@ -66,7 +77,7 @@ func startIngestChaosStack(t *testing.T, opts ...func(*ingest.Options)) *ingestS
 	t.Helper()
 	pgPool, pgCfg, pgContainer := testhelpers.StartPostgresC(t)
 	chAdmin, chCfg, chContainer := testhelpers.StartClickHouseC(t)
-	return assembleIngestStack(t, pgPool, pgCfg, chAdmin, chCfg, pgContainer, chContainer, opts...)
+	return assembleIngestStack(t, pgPool, pgCfg, chAdmin, chCfg, pgContainer, chContainer, nil, opts...)
 }
 
 // assembleIngestStack runs migrations against the supplied PG+CH handles and
@@ -77,6 +88,7 @@ func assembleIngestStack(
 	pgPool *pgxpool.Pool, pgCfg config.Config,
 	chAdmin *sql.DB, chCfg config.Config,
 	pgContainer, chContainer testcontainers.Container,
+	limiter extension.RateLimiter,
 	opts ...func(*ingest.Options),
 ) *ingestStack {
 	t.Helper()
@@ -132,6 +144,7 @@ func assembleIngestStack(
 		AllowedOrigins:       nil,
 		IngestMaxBodyBytes:   options.MaxBodyBytes,
 		DLQDepth503Threshold: options.DLQDepth503Threshold,
+		RateLimiter:          limiter,
 	}))
 	t.Cleanup(srv.Close)
 
