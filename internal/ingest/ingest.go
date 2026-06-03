@@ -59,6 +59,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jjdinho/mere-analytics/extension"
 	"github.com/jjdinho/mere-analytics/internal/auth"
 	"github.com/jjdinho/mere-analytics/internal/postgres/db"
 )
@@ -211,6 +212,12 @@ type Options struct {
 	MaxBodyBytes         int64
 	DLQDrainBatchLimit   int
 	DLQDepth503Threshold int
+
+	// UsageSink is the extension seam called after a batch durably lands in
+	// ClickHouse, with (projectID, eventCount), so a hosted build can meter for
+	// billing (ADR-0002). Nil defaults to the no-op extension.Discard, so the
+	// open-source build counts nothing.
+	UsageSink extension.UsageSink
 }
 
 // Service owns the ingest pipeline's runtime state: the in-memory channel,
@@ -224,6 +231,7 @@ type Service struct {
 	logger *slog.Logger
 	flags  *Flags
 	chBuf  *channel
+	usage  extension.UsageSink
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -241,6 +249,10 @@ func NewService(pool *pgxpool.Pool, ch *sql.DB, opts Options, logger *slog.Logge
 	if chanCap < 100 {
 		chanCap = 100
 	}
+	usage := opts.UsageSink
+	if usage == nil {
+		usage = extension.Discard{}
+	}
 	s := &Service{
 		pool:   pool,
 		q:      db.New(pool),
@@ -249,6 +261,7 @@ func NewService(pool *pgxpool.Pool, ch *sql.DB, opts Options, logger *slog.Logge
 		logger: logger,
 		flags:  &Flags{},
 		chBuf:  newChannel(opts.EventBuffer, chanCap),
+		usage:  usage,
 		stopCh: make(chan struct{}),
 	}
 	s.flags.SetDisabled(opts.Disabled)

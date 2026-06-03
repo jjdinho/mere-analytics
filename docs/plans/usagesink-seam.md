@@ -1,6 +1,8 @@
 # Plan — `UsageSink` extension seam
 
-- **Status:** Planned
+- **Status:** Implemented — `extension.UsageSink`/`Discard` + `ingest.Options.UsageSink`,
+  called grouped-by-project at the two successful-insert sites
+  (`flusher.go` primary flush, `dlq.go` drain), counting each event exactly once.
 - **Contract:** [ADR-0002](../adr/0002-open-core-hosted-wrapper.md) · License:
   [ADR-0001](../adr/0001-adopt-agpl-3.0.md)
 

@@ -75,6 +75,8 @@ func (s *Service) runFlusher(ctx context.Context) {
 // both fail the fatal flag is set; the next clean CH flush will clear it.
 func (s *Service) attemptFlush(ctx context.Context, items []flushItem, reason string) {
 	if err := s.insertIntoClickHouse(ctx, items); err == nil {
+		// Events have durably landed: meter them (no-op by default).
+		s.recordUsage(ctx, items)
 		if s.flags.IsFatal() {
 			s.flags.SetFatal(false)
 			s.logger.Info("ingest fatal cleared", "events", len(items), "reason", reason)
@@ -175,4 +177,21 @@ func wireToItems(w []wireItem) []flushItem {
 		out[i] = flushItem{projectID: it.ProjectID, event: it.Event}
 	}
 	return out
+}
+
+// recordUsage emits one UsageSink.RecordIngested per distinct project in a
+// just-landed batch. Called at the two successful-insert sites (primary flush
+// here, DLQ drain in dlq.go) so every event is metered exactly once. A batch
+// can mix projects, so it groups before emitting. The default sink is a no-op.
+func (s *Service) recordUsage(ctx context.Context, items []flushItem) {
+	if len(items) == 0 {
+		return
+	}
+	counts := make(map[string]int)
+	for _, it := range items {
+		counts[it.projectID]++
+	}
+	for projectID, n := range counts {
+		s.usage.RecordIngested(ctx, projectID, n)
+	}
 }

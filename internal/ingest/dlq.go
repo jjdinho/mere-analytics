@@ -104,6 +104,9 @@ func (s *Service) processDLQRow(ctx context.Context, row db.FailedEvent) {
 		s.logger.Warn("dlq delete failed", "id", row.ID, "err", err)
 		return
 	}
+	// These events failed the primary flush and are landing durably now, for
+	// the first time — meter them (counted exactly once; no-op by default).
+	s.recordUsage(ctx, items)
 	if s.flags.IsFatal() {
 		s.flags.SetFatal(false)
 		s.logger.Info("ingest fatal cleared via drain", "id", row.ID)

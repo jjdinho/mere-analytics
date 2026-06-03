@@ -1,6 +1,8 @@
 # Plan — `RateLimiter` extension seam
 
-- **Status:** Planned
+- **Status:** Implemented — `extension.RateLimiter`/`AllowAll` + the
+  `internal/web/ratelimit.go` middleware, wired (after tenant resolution) on the
+  ingest, query, and MCP chains in `internal/web/server.go`.
 - **Contract:** [ADR-0002](../adr/0002-open-core-hosted-wrapper.md) · License:
   [ADR-0001](../adr/0001-adopt-agpl-3.0.md)
 - **Supersedes the design portion of:** the "Per-project ingest rate limit" TODO

@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/jjdinho/mere-analytics/extension"
 	"github.com/jjdinho/mere-analytics/internal/auth"
 	"github.com/jjdinho/mere-analytics/internal/ingest"
 	"github.com/jjdinho/mere-analytics/internal/oauth"
@@ -60,6 +61,12 @@ type Options struct {
 	// + CORS middleware as /api/v1/*. Nil leaves /mcp unmounted — supported
 	// for degenerate test scenarios built without a CH pool.
 	MCPHandler http.Handler
+
+	// RateLimiter is the extension seam consulted on the ingest and query/MCP
+	// paths after the tenant is resolved (ADR-0002). Nil defaults to the no-op
+	// extension.AllowAll, so the open-source build's behavior is unchanged; a
+	// hosted wrapper or self-hoster injects a real limiter here.
+	RateLimiter extension.RateLimiter
 }
 
 // Handler builds the application's root http.Handler.
@@ -70,6 +77,9 @@ func Handler(opts Options) http.Handler {
 	}
 	if opts.QueryMaxBodyBytes == 0 {
 		opts.QueryMaxBodyBytes = 256 * 1024
+	}
+	if opts.RateLimiter == nil {
+		opts.RateLimiter = extension.AllowAll{}
 	}
 
 	mux := http.NewServeMux()
@@ -139,12 +149,12 @@ func Handler(opts Options) http.Handler {
 		// handles POST/GET/DELETE). CORS is outermost so a browser preflight
 		// is answered before bearer auth rejects the credential-less OPTIONS.
 		if opts.MCPHandler != nil {
-			mux.Handle("/mcp", cors(bearer(MaxBody(opts.QueryMaxBodyBytes)(opts.MCPHandler))))
+			mux.Handle("/mcp", cors(bearer(rateLimit(opts.RateLimiter, "mcp")(MaxBody(opts.QueryMaxBodyBytes)(opts.MCPHandler)))))
 		}
 
 		if opts.QueryExecutor != nil && opts.QuerySchema != nil {
-			queryChain := cors(bearer(MaxBody(opts.QueryMaxBodyBytes)(postAPIProjectQuery(opts.AuthService, opts.QueryExecutor, logger))))
-			schemaChain := cors(bearer(getAPIProjectSchema(opts.AuthService, opts.QuerySchema, logger)))
+			queryChain := cors(bearer(rateLimit(opts.RateLimiter, "query")(MaxBody(opts.QueryMaxBodyBytes)(postAPIProjectQuery(opts.AuthService, opts.QueryExecutor, logger)))))
+			schemaChain := cors(bearer(rateLimit(opts.RateLimiter, "query")(getAPIProjectSchema(opts.AuthService, opts.QuerySchema, logger))))
 			mux.Handle("POST /api/v1/projects/{project_id}/query", queryChain)
 			mux.Handle("GET /api/v1/projects/{project_id}/schema", schemaChain)
 			mux.Handle("OPTIONS /api/v1/projects/{project_id}/query", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +171,8 @@ func Handler(opts Options) http.Handler {
 		ingestChain := cors(
 			MaxBody(opts.IngestMaxBodyBytes)(
 				requirePublicToken(opts.IngestService, logger)(
-					postIngest(opts.IngestService, logger))))
+					rateLimit(opts.RateLimiter, "ingest")(
+						postIngest(opts.IngestService, logger)))))
 		mux.Handle("POST /api/v1/ingest/events", ingestChain)
 		mux.Handle("OPTIONS /api/v1/ingest/events", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
