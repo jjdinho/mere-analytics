@@ -1,7 +1,11 @@
 # mere
 
-A small, self-hostable analytics server. One Go binary, two databases
-(PostgreSQL + ClickHouse), no SaaS layer. You run it; you own the data.
+The self-hostable open core version of Mere Analytics. A small analytics server:
+one Go binary, two databases (PostgreSQL + ClickHouse), no SaaS layer. You run
+it; you own the data.
+
+Prefer not to operate it yourself? A cloud-hosted version is available for
+$9/month at [usemere.com](https://usemere.com).
 
 mere does three things:
 
@@ -70,6 +74,12 @@ the environment reference, operator actions, backups, and migration recovery.
 - **[docs/architecture.md](docs/architecture.md)** — how it's built and why.
 - **[docs/extending.md](docs/extending.md)** — the extension seams and how to
   build your own binary that injects custom behavior without forking.
+
+## CLI
+
+A companion command-line client lives in its own repo:
+**[mere-analytics-cli](https://github.com/jjdinho/mere-analytics-cli)**. Use it
+to send events and run queries against any mere server from your terminal.
 
 ## Contributing
 
