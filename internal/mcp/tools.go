@@ -134,6 +134,16 @@ func authorizeProject(ctx context.Context, deps Deps) (string, *mcpgo.CallToolRe
 		}
 		return "", nil, err
 	}
+	// Entitlement gate (see docs/extending.md): checked after visibility so an
+	// over-quota deny can't reveal a project the grant can't already see. A
+	// hosted build denies here once the project is over quota and unpaid; the
+	// open-source default (extension.Unlimited) always allows.
+	if ok, reason := deps.Entitlement.AllowAnalysis(ctx, ac.ProjectID); !ok {
+		if reason == "" {
+			reason = "analysis is over the plan limit for this project; upgrade to continue"
+		}
+		return "", mcpgo.NewToolResultError(reason), nil
+	}
 	return ac.ProjectID, nil, nil
 }
 

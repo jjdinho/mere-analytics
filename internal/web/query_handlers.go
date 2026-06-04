@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jjdinho/mere-analytics/extension"
 	"github.com/jjdinho/mere-analytics/internal/auth"
 	"github.com/jjdinho/mere-analytics/internal/oauth"
 	"github.com/jjdinho/mere-analytics/internal/query"
@@ -85,7 +86,7 @@ func bearerCanReadProject(r *http.Request, authSvc *auth.Service, projectID stri
 	return true, nil
 }
 
-func getProjectQuery(schema *query.SchemaProvider, logger *slog.Logger) http.HandlerFunc {
+func getProjectQuery(ent extension.Entitlement, upgradeURL string, schema *query.SchemaProvider, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := r.PathValue("id")
 		v := auth.ViewerFrom(r.Context())
@@ -98,6 +99,9 @@ func getProjectQuery(schema *query.SchemaProvider, logger *slog.Logger) http.Han
 		if err != nil {
 			logger.Error("project query get", "err", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if gateAnalysisHTML(w, r, ent, upgradeURL, proj.ID) {
 			return
 		}
 		catalog, err := schema.Schema(r.Context())
@@ -115,7 +119,7 @@ func getProjectQuery(schema *query.SchemaProvider, logger *slog.Logger) http.Han
 	}
 }
 
-func postProjectQuery(exec *query.Executor, schema *query.SchemaProvider, logger *slog.Logger) http.HandlerFunc {
+func postProjectQuery(ent extension.Entitlement, upgradeURL string, exec *query.Executor, schema *query.SchemaProvider, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := r.PathValue("id")
 		v := auth.ViewerFrom(r.Context())
@@ -128,6 +132,9 @@ func postProjectQuery(exec *query.Executor, schema *query.SchemaProvider, logger
 		if err != nil {
 			logger.Error("project query authorize", "err", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if gateAnalysisHTML(w, r, ent, upgradeURL, proj.ID) {
 			return
 		}
 		if err := r.ParseForm(); err != nil {

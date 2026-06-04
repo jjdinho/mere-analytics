@@ -14,6 +14,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/jjdinho/mere-analytics/extension"
 	"github.com/jjdinho/mere-analytics/internal/auth"
 	"github.com/jjdinho/mere-analytics/internal/query"
 )
@@ -27,10 +28,16 @@ const (
 // grant's project is still visible to the granting user (soft-delete /
 // membership parity with the HTTP API, decision #11); Executor and Schema are
 // the shared internal/query services.
+//
+// Entitlement is the analysis gate (see docs/extending.md): consulted in
+// authorizeProject after visibility, so an over-quota project's query + schema
+// tools deny with an upgrade message. Nil defaults to the no-op
+// extension.Unlimited, matching the open-source build's always-allow behavior.
 type Deps struct {
 	AuthService *auth.Service
 	Executor    *query.Executor
 	Schema      *query.SchemaProvider
+	Entitlement extension.Entitlement
 	Logger      *slog.Logger
 }
 
@@ -40,6 +47,9 @@ type Deps struct {
 func NewServer(deps Deps) *server.MCPServer {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
+	}
+	if deps.Entitlement == nil {
+		deps.Entitlement = extension.Unlimited{}
 	}
 	s := server.NewMCPServer(serverName, serverVersion,
 		// Static tool set — no list-changed notifications to advertise.

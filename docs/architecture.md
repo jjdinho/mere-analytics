@@ -54,6 +54,12 @@ the no-op allow-all default, so there is no rate limiting here — only a generi
 extension point. A denied request gets `429` + `Retry-After` and the handler
 never runs.
 
+On the analysis surfaces only (REST + MCP `query`/`schema`, web playground) a
+second seam, `extension.Entitlement`, gates access after the project resolves —
+ingest is left untouched, so a hosted build can keep accepting events while
+denying analysis. A denied request gets `402` (API/MCP) or an upgrade redirect
+(web). The open-source build ships the no-op allow-all default.
+
 Routing is stdlib `net/http` with the Go 1.22+ pattern mux — no third-party
 router. The whole HTTP surface is assembled in `internal/web/server.go`.
 
@@ -203,7 +209,7 @@ ClickHouse run as Kamal accessories with data on host volumes under
 | `cmd/server` | Entry-point shim; forwards the build-time `Version` into `app`. |
 | `cmd/maintenance` | One-shot expired-row sweeper. |
 | `app` | Importable composition root: boot sequence + SIGTERM choreography; seam injection points. |
-| `extension` | Exported in-process extension seams (`RateLimiter`, `UsageSink`) + no-op defaults; the only non-`internal/` package. |
+| `extension` | Exported in-process extension seams (`RateLimiter`, `UsageSink`, `Entitlement`) + no-op defaults; the only non-`internal/` package. |
 | `internal/web` | HTTP handlers, middleware, route assembly. |
 | `internal/auth` | Sessions, password hashing, CSRF, tokens, the `Viewer`. |
 | `internal/oauth` | OAuth 2.1 server: clients, codes, access tokens, PKCE. |
