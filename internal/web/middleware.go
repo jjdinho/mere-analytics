@@ -1,9 +1,12 @@
 package web
 
 import (
+	"compress/gzip"
+	"io"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -59,6 +62,36 @@ func MaxBody(n int64) func(http.Handler) http.Handler {
 	}
 }
 
+// Decompress swaps a gzip request body for its decoded stream when the client
+// sends Content-Encoding: gzip. maxDecompressed caps the decoded size, reusing
+// MaxBytesReader so a zip bomb maps to 413 via the same read-error path as an
+// oversize plain body. Mount INSIDE MaxBody (so the compressed wire bytes are
+// capped first) and BEFORE requirePublicToken (which reads the decoded body to
+// find the token).
+func Decompress(maxDecompressed int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+				zr, err := gzip.NewReader(r.Body)
+				if err != nil {
+					http.Error(w, "invalid gzip body", http.StatusBadRequest)
+					return
+				}
+				r.Body = struct {
+					io.Reader
+					io.Closer
+				}{
+					Reader: http.MaxBytesReader(w, io.NopCloser(zr), maxDecompressed),
+					Closer: zr,
+				}
+				r.Header.Del("Content-Encoding")
+				r.ContentLength = -1
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // CORS handles the SDK snippet's cross-origin POST to /api/v1/ingest/events. An empty
 // allowedOrigins slice is "permissive" — the response carries
 // Access-Control-Allow-Origin: * so any first-party page can write events.
@@ -108,7 +141,10 @@ func setCORSHeaders(w http.ResponseWriter, origin string, allow map[string]struc
 		return
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	// Authorization for the bearer-protected query/MCP surfaces; Content-Type for
+	// every JSON POST; Content-Encoding so the ingest SDK's gzip POST clears
+	// preflight (gzip is a non-safelisted request-header value).
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Content-Encoding")
 }
 
 // recoverMiddleware turns panics into 500 responses + logged stack traces.

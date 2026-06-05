@@ -2,6 +2,7 @@ package web_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -206,12 +207,17 @@ func userIDByEmail(t *testing.T, pool *pgxpool.Pool, email string) string {
 
 func postIngestBatch(t *testing.T, url, token string, body any) *http.Response {
 	t.Helper()
+	// The credential now rides in the JSON body's "token" field, not an
+	// Authorization header. Callers pass the events envelope as a map; inject
+	// the token alongside "events".
+	if m, ok := body.(map[string]any); ok {
+		m["token"] = token
+	}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		t.Fatalf("encode: %v", err)
 	}
 	req, _ := http.NewRequest("POST", url+"/api/v1/ingest/events", &buf)
-	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -329,27 +335,25 @@ func TestIngest_LenientExtrasAndEpochTimestamp(t *testing.T) {
 	}
 }
 
-// TestIngest_AuthEdges covers the four 401 surfaces + the 500 surface (the
-// last requires PG-down, which we simulate by closing the pool — see
-// TestIngest_PGDownReturns500).
+// TestIngest_AuthEdges covers the three in-body-token 401 surfaces + the 202
+// success. The 500 surface requires PG-down, simulated by closing the pool —
+// see TestIngest_PGDownReturns500.
 func TestIngest_AuthEdges(t *testing.T) {
 	st := startIngestStack(t)
-	goodToken, projectID := mintProjectAndToken(t, st)
-	_ = projectID
+	goodToken, _ := mintProjectAndToken(t, st)
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	body := map[string]any{"events": []map[string]any{{"event": "x", "timestamp": now}}}
-	encode := func() *bytes.Buffer {
+	// post sends an events envelope; a non-empty token is injected into the body
+	// (empty token omits the field entirely).
+	post := func(token string) *http.Response {
+		body := map[string]any{"events": []map[string]any{{"event": "x", "timestamp": now}}}
+		if token != "" {
+			body["token"] = token
+		}
 		var buf bytes.Buffer
 		_ = json.NewEncoder(&buf).Encode(body)
-		return &buf
-	}
-	post := func(headers map[string]string) *http.Response {
-		req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events", encode())
+		req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events", &buf)
 		req.Header.Set("Content-Type", "application/json")
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("POST: %v", err)
@@ -359,22 +363,17 @@ func TestIngest_AuthEdges(t *testing.T) {
 
 	cases := []struct {
 		name       string
-		auth       string
+		token      string
 		wantStatus int
 	}{
-		{"missing authorization", "", http.StatusUnauthorized},
-		{"non-bearer scheme", "Basic foo", http.StatusUnauthorized},
-		{"non-prefix bearer (oauth-style)", "Bearer some-43char-opaque-token-without-mere-pub", http.StatusUnauthorized},
-		{"unknown mere_pub token", "Bearer mere_pub_unknown-token-value", http.StatusUnauthorized},
-		{"valid token + good batch", "Bearer " + goodToken, http.StatusAccepted},
+		{"missing token", "", http.StatusUnauthorized},
+		{"non-prefix token (oauth-style)", "some-43char-opaque-token-without-mere-pub", http.StatusUnauthorized},
+		{"unknown mere_pub token", "mere_pub_unknown-token-value", http.StatusUnauthorized},
+		{"valid token + good batch", goodToken, http.StatusAccepted},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			headers := map[string]string{}
-			if c.auth != "" {
-				headers["Authorization"] = c.auth
-			}
-			resp := post(headers)
+			resp := post(c.token)
 			resp.Body.Close()
 			if resp.StatusCode != c.wantStatus {
 				t.Errorf("status: %d want %d", resp.StatusCode, c.wantStatus)
@@ -422,10 +421,10 @@ func TestIngest_PGDownReturns500(t *testing.T) {
 	}
 }
 
-// TestIngest_OversizedBody asserts MaxBody + DecodeJSON respond with 413
-// when the request body overruns the configured ceiling. The body must be
-// valid JSON whose token stream is still being read when the cap fires —
-// random bytes would just trip the syntax-error → 400 branch.
+// TestIngest_OversizedBody asserts the body cap responds with 413 when the
+// request overruns the configured ceiling. The oversize is now caught in
+// requirePublicToken's ReadAll (MaxBytesError → 413) before it ever probes for
+// the token, so the read fails regardless of JSON shape.
 func TestIngest_OversizedBody(t *testing.T) {
 	st := startIngestStack(t, func(o *ingest.Options) {
 		o.MaxBodyBytes = 1024 // 1 KiB ceiling
@@ -434,10 +433,11 @@ func TestIngest_OversizedBody(t *testing.T) {
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	// One event whose extras blob is a giant JSON-quoted string. Well over
-	// 1 KiB after serialization, so MaxBytesReader fires before Decode
-	// returns.
+	// 1 KiB after serialization, so MaxBytesReader fires while the body is
+	// being read.
 	padding := strings.Repeat("a", 4096)
 	body := map[string]any{
+		"token": token,
 		"events": []map[string]any{
 			{"event": "x", "timestamp": now, "extras": map[string]any{"pad": padding}},
 		},
@@ -445,7 +445,6 @@ func TestIngest_OversizedBody(t *testing.T) {
 	var buf bytes.Buffer
 	_ = json.NewEncoder(&buf).Encode(body)
 	req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events", &buf)
-	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -457,13 +456,14 @@ func TestIngest_OversizedBody(t *testing.T) {
 	}
 }
 
-// TestIngest_InvalidJSON asserts a syntactically broken body → 400.
+// TestIngest_InvalidJSON asserts a syntactically broken body → 400. The probe
+// in requirePublicToken now fails to unmarshal the body and returns 400 before
+// the token is ever read.
 func TestIngest_InvalidJSON(t *testing.T) {
 	st := startIngestStack(t)
-	token, _ := mintProjectAndToken(t, st)
+	mintProjectAndToken(t, st)
 
 	req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events", bytes.NewReader([]byte(`{not json}`)))
-	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -473,6 +473,63 @@ func TestIngest_InvalidJSON(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status: %d want 400", resp.StatusCode)
 	}
+}
+
+// TestIngest_GzipBody exercises the Decompress middleware end-to-end: a body
+// sent with Content-Encoding: gzip is decoded, authenticated from the in-body
+// token, accepted (202), and lands in ClickHouse; a body that claims gzip but
+// isn't is rejected by gzip.NewReader with 400.
+func TestIngest_GzipBody(t *testing.T) {
+	st := startIngestStack(t)
+	token, projectID := mintProjectAndToken(t, st)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	t.Run("gzip body accepted", func(t *testing.T) {
+		envelope := map[string]any{
+			"token":  token,
+			"events": []map[string]any{{"event": "pageview", "timestamp": now}},
+		}
+		plain, _ := json.Marshal(envelope)
+		var gz bytes.Buffer
+		zw := gzip.NewWriter(&gz)
+		if _, err := zw.Write(plain); err != nil {
+			t.Fatalf("gzip write: %v", err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatalf("gzip close: %v", err)
+		}
+
+		req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events", &gz)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Encoding", "gzip")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("status: %d want 202; body=%s", resp.StatusCode, raw)
+		}
+		if got := waitForCHCount(t, st.chAdmin, projectID, 1, 5*time.Second); got != 1 {
+			t.Errorf("ch count: %d want 1 (gzip event must reach CH)", got)
+		}
+	})
+
+	t.Run("corrupt gzip body rejected", func(t *testing.T) {
+		req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events",
+			bytes.NewReader([]byte("this is not gzip")))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Encoding", "gzip")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("status: %d want 400 (corrupt gzip)", resp.StatusCode)
+		}
+	})
 }
 
 // TestIngest_EmptyBatch asserts an empty events array short-circuits with
@@ -541,6 +598,9 @@ func TestIngest_CORS(t *testing.T) {
 		if got := resp.Header.Get("Access-Control-Allow-Methods"); got == "" {
 			t.Errorf("Allow-Methods missing")
 		}
+		if got := resp.Header.Get("Access-Control-Allow-Headers"); !strings.Contains(got, "Content-Encoding") {
+			t.Errorf("Allow-Headers %q must include Content-Encoding for the gzip preflight", got)
+		}
 	})
 
 	t.Run("POST carries CORS headers", func(t *testing.T) {
@@ -548,8 +608,7 @@ func TestIngest_CORS(t *testing.T) {
 		token, _ := mintProjectAndToken(t, st)
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		req, _ := http.NewRequest("POST", st.srv.URL+"/api/v1/ingest/events",
-			bytes.NewBufferString(fmt.Sprintf(`{"events":[{"event":"x","timestamp":%q}]}`, now)))
-		req.Header.Set("Authorization", "Bearer "+token)
+			bytes.NewBufferString(fmt.Sprintf(`{"token":%q,"events":[{"event":"x","timestamp":%q}]}`, token, now)))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Origin", "https://example.com")
 		resp, err := http.DefaultClient.Do(req)
