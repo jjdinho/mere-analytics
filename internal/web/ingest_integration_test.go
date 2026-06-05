@@ -507,7 +507,7 @@ func TestIngest_GzipBody(t *testing.T) {
 			t.Fatalf("POST: %v", err)
 		}
 		raw, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusAccepted {
 			t.Fatalf("status: %d want 202; body=%s", resp.StatusCode, raw)
 		}
@@ -525,7 +525,7 @@ func TestIngest_GzipBody(t *testing.T) {
 		if err != nil {
 			t.Fatalf("POST: %v", err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("status: %d want 400 (corrupt gzip)", resp.StatusCode)
 		}
