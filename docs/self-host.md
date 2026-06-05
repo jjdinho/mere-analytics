@@ -132,6 +132,46 @@ Set in `config/deploy.yml` under `env.clear` (non-secret) or `env.secret`
 | `QUERY_MAX_RESULT_ROWS` | `1000` | Max rows ClickHouse may return for API, MCP, and playground queries. |
 | `QUERY_MAX_EXECUTION_TIME` | `1m` | Max ClickHouse query runtime for API, MCP, and playground queries. |
 
+### Tuning ingest throughput
+
+Ingest is an in-process buffered pipeline: accepted events sit in an in-flight
+buffer and are flushed to ClickHouse in batches. Three knobs govern it, and the
+right values depend on **your hardware and how fast your ClickHouse can absorb
+inserts** — there is no single correct setting.
+
+| Variable | What it controls |
+|---|---|
+| `INGEST_EVENT_BUFFER` | Ceiling of events held in memory awaiting a flush. When full, ingest sheds load with `503 ingest channel full` + `Retry-After: 1` (well-behaved clients retry — see the [API retry contract](api.md#retrying-ingest--clients-must-handle-503)). |
+| `INGEST_FLUSH_EVENTS` | Flush as soon as this many events accumulate. |
+| `INGEST_FLUSH_INTERVAL` | Flush at least this often, even when below `INGEST_FLUSH_EVENTS`. |
+
+How they relate:
+
+- **Sustained throughput is bounded by ClickHouse, not by these knobs.** The
+  pipeline can only accept events as fast as ClickHouse drains them. A bigger
+  buffer absorbs longer *bursts*; it does not raise the steady-state rate. If
+  inserts are slow, find out why (disk I/O, an undersized CH node, contention)
+  before raising the buffer — a large buffer in front of a slow CH just delays
+  the `503`s and grows memory use.
+- **`INGEST_EVENT_BUFFER` is your burst headroom.** Size it to roughly the
+  largest spike you want to absorb without `503`s, given your drain rate — e.g.
+  if CH comfortably ingests ~100k events/s and you want to ride out a 2-second
+  spike, ~200k of buffer covers it. Each buffered event costs memory, so don't
+  set it arbitrarily high; size it to the spike and the RAM you have.
+- **`INGEST_FLUSH_EVENTS` trades batch size against latency.** Larger flushes
+  are more efficient for ClickHouse (fewer, bigger inserts) but hold events in
+  memory longer; smaller flushes write sooner. Keep it well below
+  `INGEST_EVENT_BUFFER` so the buffer can hold several pending flushes.
+- **`INGEST_FLUSH_INTERVAL`** bounds how long a low-traffic event waits before
+  it's written, independent of volume.
+
+Practical method: load-test against *your* ClickHouse with a retrying client,
+watch the sustained `events/s` and the `503` rate, and raise
+`INGEST_EVENT_BUFFER` / `INGEST_FLUSH_EVENTS` until bursts stop producing `503`s.
+If `503`s persist at steady state (not just on spikes), ClickHouse is the
+bottleneck — scale it rather than the buffer. Regardless of tuning, clients must
+still retry on `503`; the buffer reduces how often they have to.
+
 ## Operator actions
 
 Anything you can't do through the web UI is a **Kamal alias** that `exec`s into

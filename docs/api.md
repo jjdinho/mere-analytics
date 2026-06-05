@@ -128,6 +128,35 @@ Validation never silently drops: rejected events are reported per-index in
 | `ingest down` | Both ClickHouse and the Postgres DLQ failed in the same flush (fatal state). Clears on the first successful flush. | `5` |
 | `ingest channel full` | In-flight event buffer saturated (`INGEST_EVENT_BUFFER`). | `1` |
 
+### Retrying ingest — clients must handle `503`
+
+**A `503` means the batch was *not* accepted (`accepted: 0`). The events still
+live only in your client.** The "events are never dropped" guarantee covers
+events that reached a `202` — those land in ClickHouse, or the Postgres DLQ on a
+transient outage, and are never lost. A `503` is the opposite case: nothing was
+enqueued, so if your client does not resend, *those events are dropped at the
+client*.
+
+`ingest channel full` is **normal backpressure**, not an error: under a burst
+that arrives faster than the server can drain to ClickHouse, the in-flight
+buffer (`INGEST_EVENT_BUFFER`) fills and the server sheds load with `503` +
+`Retry-After: 1` rather than dropping data. A naive producer that fires as fast
+as it can will see a large fraction of `503`s once it outruns the drain rate; a
+producer that retries ingests everything.
+
+Any ingest client (browser snippet, SDK, agent) **must**:
+
+- **Retry every `503`** — honor `Retry-After` and back off (exponential with
+  jitter is fine), then resend the same batch. Do not drop the batch.
+- Retry transport errors and `5xx` the same way.
+- **Not** retry `400` (malformed — fix the payload) or `401` (bad token).
+- Treat per-event entries in `errors` as permanent: those events failed
+  validation and will fail again. The rest of the batch was still accepted.
+
+If sustained `503`s are a problem rather than a brief spike, the *operator* can
+raise the server's drain ceiling — see
+[Tuning ingest throughput](self-host.md#tuning-ingest-throughput).
+
 ---
 
 ## Query
