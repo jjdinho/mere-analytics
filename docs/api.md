@@ -10,9 +10,11 @@ shipped implementation; where this doc and the code disagree, the code wins.
 - **Versioning** — `/v1` is forever-stable. Breaking changes ship at `/v2`;
   additive changes (new fields, new endpoints) are allowed within `/v1`.
 - **Two auth planes:**
-  - **Public ingest token** — a per-project `mere_pub_…` token, sent as
-    `Authorization: Bearer mere_pub_…`. Non-secret by design (it lives in client
-    HTML). Resolves the project; the project is never taken from the URL or body.
+  - **Public ingest token** — a per-project `mere_pub_…` token, sent in the
+    request body's `token` field (so the browser SDK can authenticate over
+    `navigator.sendBeacon` at page-unload, where request headers can't be set).
+    Non-secret by design (it lives in client HTML). Resolves the project
+    server-side; the project is never read from the URL or a body field.
   - **OAuth 2.1 bearer token** — a short-lived access token issued by the
     in-process OAuth server (`/oauth/*`), sent as `Authorization: Bearer …`.
     Bound to one `(user, project)` pair. Protects `/api/v1/*`, `/mcp`, and
@@ -22,7 +24,8 @@ shipped implementation; where this doc and the code disagree, the code wins.
   `Access-Control-Allow-Origin: *`; with a configured allowlist it echoes a
   matching `Origin` (and sets `Vary: Origin`) or omits CORS headers entirely.
   Allowed methods: `GET, POST, OPTIONS`. Allowed headers:
-  `Authorization, Content-Type`. Preflight `OPTIONS` returns `204`.
+  `Authorization, Content-Type, Content-Encoding` (`Content-Encoding` lets the
+  ingest SDK's gzip POST clear preflight). Preflight `OPTIONS` returns `204`.
 
 ---
 
@@ -31,17 +34,18 @@ shipped implementation; where this doc and the code disagree, the code wins.
 ### `POST /api/v1/ingest/events`
 
 Submit a batch of events. Authenticated with the project's **public ingest
-token**.
+token**, carried in the request body's `token` field.
 
 ```
-Authorization: Bearer mere_pub_<token>
 Content-Type: application/json
+Content-Encoding: gzip          # optional; set only when the body is gzip-compressed
 ```
 
-**Request body** — a single object with an `events` array:
+**Request body** — a single object with a `token` and an `events` array:
 
 ```json
 {
+  "token": "mere_pub_<token>",
   "events": [
     {
       "event": "pageview",
@@ -90,8 +94,8 @@ linked `user_id` after the `$identify` event is ingested.
 > column — there's no rejection and no migration to ship, so consumers can
 > attach and later query their own fields freely. You may also send an explicit
 > `extras` object; stray fields merge on top of it. (Unknown keys on the
-> *request envelope* itself — anything other than `events` — are still rejected
-> with `400`.)
+> *request envelope* itself — anything other than `token` or `events` — are
+> still rejected with `400`.)
 
 **Responses:**
 
@@ -99,9 +103,9 @@ linked `user_id` after the `$identify` event is ingested.
 |---|---|---|
 | `202 Accepted` | At least one event passed validation and was enqueued. | `{"accepted": N, "rejected": M, "errors": [...]}` |
 | `200 OK` | The batch contained zero valid events (e.g. empty array, or every event rejected). | `{"accepted": 0, "rejected": M, "errors": [...]}` |
-| `400 Bad Request` | Malformed JSON, an unparseable timestamp string, or an unknown key on the request envelope. | `invalid json: <detail>` |
+| `400 Bad Request` | Malformed JSON, an unparseable timestamp string, an unknown key on the request envelope, or a body that declares `Content-Encoding: gzip` but isn't valid gzip. | `invalid json: <detail>` \| `invalid gzip body` |
 | `401 Unauthorized` | Missing/non-`mere_pub_` token, or unknown / revoked token, or the project is soft-deleted. | `unauthorized` (+ `WWW-Authenticate: Bearer realm="api", error="invalid_request"\|"invalid_token"`) |
-| `413 Payload Too Large` | Body exceeds `INGEST_MAX_BODY_BYTES` (default 10 MiB). | `request body too large` |
+| `413 Payload Too Large` | The request body — or, for a gzip request, its decompressed size — exceeds `INGEST_MAX_BODY_BYTES` (default 10 MiB). | `request body too large` |
 | `503 Service Unavailable` | Ingest disabled / pipeline fatal / buffer saturated (see below). | `ingest disabled` \| `ingest down` \| `ingest channel full` (+ `Retry-After`) |
 | `500 Internal Server Error` | Infrastructure failure during token lookup or submit. | `internal server error` |
 

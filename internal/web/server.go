@@ -185,9 +185,10 @@ func Handler(opts Options) http.Handler {
 		cors := CORS(opts.AllowedOrigins)
 		ingestChain := cors(
 			MaxBody(opts.IngestMaxBodyBytes)(
-				requirePublicToken(opts.IngestService, logger)(
-					rateLimit(opts.RateLimiter, "ingest")(
-						postIngest(opts.IngestService, logger)))))
+				Decompress(opts.IngestMaxBodyBytes)(
+					requirePublicToken(opts.IngestService, logger)(
+						rateLimit(opts.RateLimiter, "ingest")(
+							postIngest(opts.IngestService, logger))))))
 		mux.Handle("POST /api/v1/ingest/events", ingestChain)
 		mux.Handle("OPTIONS /api/v1/ingest/events", cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
